@@ -578,4 +578,19 @@ class LibraryDb(ctx: Context) : SQLiteOpenHelper(ctx, "library.db", null, 7) {
     }
 
     fun removedSongs(): List<SongRow> = songsWhere("s.removed = 1 ORDER BY s.artist, s.title")
+
+    /** Empties everything that belongs to the logged-in account (see Services.forgetLibrary). */
+    fun clearLibrary() {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            for (t in listOf("songs", "albums", "artists", "cache", "pins", "lyrics", "playlists", "playlist_songs", "radios", "ratings", "scrobbles")) {
+                db.delete(t, null, null)
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        meta.edit().remove("radiosModified").apply()
+    }
 }

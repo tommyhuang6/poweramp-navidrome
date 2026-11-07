@@ -8,16 +8,29 @@ import okhttp3.Response
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
+import java.security.KeyStore
 import java.security.MessageDigest
 import java.security.SecureRandom
+import java.security.cert.CertificateException
 import java.security.cert.X509Certificate
+import java.util.Locale
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
+import javax.net.ssl.HttpsURLConnection
 import javax.net.ssl.SSLContext
 import javax.net.ssl.TrustManager
+import javax.net.ssl.TrustManagerFactory
 import javax.net.ssl.X509TrustManager
 
-/** The server answered and refused (a Subsonic error such as "not found"); retrying won't help. HTTP and network errors stay plain IOExceptions. */
-class SubsonicException(message: String) : IOException(message)
+/**
+ * The server answered with a Subsonic error. [code] is the Subsonic error code (0 if missing), e.g.
+ * 70 "not found" (retrying won't help) or 40 "wrong username or password" (it will, after a new login).
+ * HTTP and network errors stay plain IOExceptions.
+ */
+class SubsonicException(message: String, val code: Int = 0) : IOException(message) {
+    /** Login problems (40-44, e.g. a changed password) or no code at all: the request itself may be fine, so keep it. */
+    val isAuthError: Boolean get() = code == 0 || code in 40..44
+}
 
 data class ServerInfo(val type: String, val serverVersion: String, val apiVersion: String) {
     val label: String get() = listOf(type, serverVersion).filter { it.isNotBlank() }.joinToString(" ")
@@ -32,6 +45,8 @@ data class Album(
     val artistId: String,
     val coverArt: String?,
     val year: Int,
+    /** As reported in the album list; used to check that the song listing is complete. */
+    val songCount: Int = 0,
 )
 
 data class Song(
@@ -78,10 +93,14 @@ class SubsonicClient(
     private val salt: String,
     private val token: String,
     trustAll: Boolean,
+    /** SHA-256 of the self-signed certificate trusted for this server; blank = not pinned yet. */
+    certPin: String = "",
+    /** Called with the fingerprint when a blank [certPin] gets pinned on the first connection. */
+    onPin: (String) -> Unit = {},
 ) {
     private val base: HttpUrl = normalizeUrl(serverUrl).toHttpUrl()
 
-    val http: OkHttpClient = httpClient(trustAll)
+    val http: OkHttpClient = httpClient(trustAll, certPin, onPin)
 
     fun url(method: String, vararg params: Pair<String, Any>): HttpUrl =
         base.newBuilder()
@@ -109,7 +128,7 @@ class SubsonicClient(
     private fun checkOk(root: JSONObject, method: String): JSONObject {
         if (root.optString("status") != "ok") {
             val err = root.optJSONObject("error")
-            throw SubsonicException(err?.optString("message") ?: "Server error in $method")
+            throw SubsonicException(err?.optString("message") ?: "Server error in $method", err?.optInt("code") ?: 0)
         }
         return root
     }
@@ -165,6 +184,7 @@ class SubsonicClient(
                     artistId = a.optString("artistId"),
                     coverArt = a.coverArtId(),
                     year = a.optInt("year"),
+                    songCount = a.optInt("songCount"),
                 )
             }
             if (page.length() < PAGE) break
@@ -188,6 +208,15 @@ class SubsonicClient(
             offset += PAGE
         }
         return out
+    }
+
+    /**
+     * Songs of one album. Used when search3 does not list the whole library (servers other than
+     * Navidrome may return nothing for an empty query).
+     */
+    fun albumSongs(albumId: String): List<Song> {
+        val list = call("getAlbum", "id" to albumId).optJSONObject("album")?.optJSONArray("song") ?: return emptyList()
+        return (0 until list.length()).map { parseSong(list.getJSONObject(it)) }
     }
 
     private fun parseSong(s: JSONObject) = Song(
@@ -309,7 +338,8 @@ class SubsonicClient(
         for (i in 0 until lines.length()) {
             val l = lines.getJSONObject(i)
             val ms = (l.optLong("start") + offsetMs).coerceAtLeast(0)
-            append("[%02d:%02d.%02d]".format(ms / 60000, (ms / 1000) % 60, (ms % 1000) / 10))
+            // Locale.ROOT: in e.g. Arabic the default locale writes Arabic-Indic digits, which LRC parsers can't read.
+            append(String.format(Locale.ROOT, "[%02d:%02d.%02d]", ms / 60000, (ms / 1000) % 60, (ms % 1000) / 10))
             append(l.optString("value")).append('\n')
         }
     }
@@ -322,11 +352,42 @@ class SubsonicClient(
         const val CLIENT_NAME = "PowerampNavidrome"
         private const val PAGE = 500
 
+        fun hasScheme(url: String): Boolean =
+            url.trim().let { it.startsWith("http://", true) || it.startsWith("https://", true) }
+
+        /** Without a scheme the address is taken as https, so the token never goes out unencrypted by accident. */
         fun normalizeUrl(url: String): String {
             var u = url.trim().trimEnd('/')
-            if (!u.startsWith("http://") && !u.startsWith("https://")) u = "http://$u"
+            if (!hasScheme(u)) u = "https://$u"
             return "$u/"
         }
+
+        /**
+         * Addresses plain http is acceptable for: private LAN ranges, loopback, Tailscale
+         * (100.64.0.0/10, *.ts.net) and .local/.lan/.home names. Anything else is the open internet.
+         */
+        fun isLocalAddress(url: String): Boolean {
+            val host = runCatching { normalizeUrl(url).toHttpUrl().host }.getOrNull()?.lowercase() ?: return false
+            if (host == "localhost" || listOf(".local", ".lan", ".home", ".home.arpa", ".internal", ".ts.net").any { host.endsWith(it) }) {
+                return true
+            }
+            // Literal IPs only, parsed by hand: no DNS lookup, safe on the main thread.
+            if (host.contains(':')) { // IPv6: loopback, link-local fe80::/10, unique-local fc00::/7
+                return host == "::1" || host.startsWith("fe8") || host.startsWith("fe9") ||
+                    host.startsWith("fea") || host.startsWith("feb") || host.startsWith("fc") || host.startsWith("fd")
+            }
+            val b = host.split('.').map { it.toIntOrNull() ?: return false }
+            if (b.size != 4 || b.any { it !in 0..255 }) return false
+            return b[0] == 10 || b[0] == 127 ||
+                (b[0] == 172 && b[1] in 16..31) ||
+                (b[0] == 192 && b[1] == 168) ||
+                (b[0] == 169 && b[1] == 254) ||
+                (b[0] == 100 && b[1] in 64..127) // Tailscale / CGNAT 100.64.0.0/10
+        }
+
+        /** True when the address sends the token unencrypted over the internet. */
+        fun isInsecureRemote(url: String): Boolean =
+            url.trim().startsWith("http://", true) && !isLocalAddress(url)
 
         /** Returns (salt, token) for Subsonic token auth. */
         fun makeToken(password: String): Pair<String, String> {
@@ -336,19 +397,56 @@ class SubsonicClient(
             return salt to md5.joinToString("") { "%02x".format(it) }
         }
 
-        fun httpClient(trustAll: Boolean): OkHttpClient {
+        fun sha256(cert: java.security.cert.Certificate): String =
+            MessageDigest.getInstance("SHA-256").digest(cert.encoded).joinToString("") { "%02x".format(it) }
+
+        /**
+         * With [trustAll] off: normal certificate checks. With it on ("Accept untrusted HTTPS
+         * certificates", for self-signed home servers): certificates the system trusts pass as usual;
+         * otherwise only the one certificate pinned on the first connection is accepted, so a different
+         * certificate presented later (someone in the middle) is refused. A blank [pin] is filled from
+         * the first connection and reported through [onPin].
+         */
+        fun httpClient(trustAll: Boolean, pin: String = "", onPin: (String) -> Unit = {}): OkHttpClient {
             val b = OkHttpClient.Builder()
                 .connectTimeout(10, TimeUnit.SECONDS)
                 .readTimeout(30, TimeUnit.SECONDS)
             if (trustAll) {
-                // Only when the user turns on "Accept untrusted HTTPS certificates" (self-signed home servers).
+                val system = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
+                    .apply { init(null as KeyStore?) }
+                    .trustManagers.filterIsInstance<X509TrustManager>().first()
+                val pinned = AtomicReference(pin)
                 val tm = object : X509TrustManager {
-                    override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) {}
-                    override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) {}
-                    override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
+                    override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) =
+                        system.checkClientTrusted(chain, authType)
+
+                    override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) {
+                        val fp = sha256(chain.first())
+                        // Pinned on the first connection even if the system trusts it, so an untrusted
+                        // certificate turning up later is refused rather than pinned.
+                        if (pinned.compareAndSet("", fp)) onPin(fp)
+                        try {
+                            system.checkServerTrusted(chain, authType)
+                            return
+                        } catch (_: CertificateException) {
+                            // Not trusted by the system: only the pinned certificate may pass.
+                        }
+                        if (fp != pinned.get()) throw CertificateException(
+                            "The server's certificate changed. If you renewed it, turn " +
+                                "\"Accept untrusted HTTPS certificates\" off and on again."
+                        )
+                    }
+
+                    override fun getAcceptedIssuers(): Array<X509Certificate> = system.acceptedIssuers
                 }
                 val ssl = SSLContext.getInstance("TLS").apply { init(null, arrayOf<TrustManager>(tm), SecureRandom()) }
-                b.sslSocketFactory(ssl.socketFactory, tm).hostnameVerifier { _, _ -> true }
+                val defaultVerifier = HttpsURLConnection.getDefaultHostnameVerifier()
+                b.sslSocketFactory(ssl.socketFactory, tm).hostnameVerifier { host, session ->
+                    // Self-signed certificates often don't name the address used (a LAN IP, say);
+                    // the pinned fingerprint already identifies the server.
+                    defaultVerifier.verify(host, session) ||
+                        runCatching { sha256(session.peerCertificates.first()) == pinned.get() }.getOrDefault(false)
+                }
             }
             return b.build()
         }

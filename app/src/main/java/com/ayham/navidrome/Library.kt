@@ -11,6 +11,8 @@ import android.util.Log
 import com.maxmpz.poweramp.player.PowerampAPI
 import com.maxmpz.poweramp.player.PowerampAPIHelper
 import java.io.File
+import java.io.IOException
+import java.util.concurrent.ConcurrentHashMap
 
 /** Album covers, fetched once at Poweramp's preferred 1024 px and kept for offline use. */
 class CoverCache(private val s: Services) {
@@ -20,19 +22,37 @@ class CoverCache(private val s: Services) {
     fun cached(coverArtId: String): File? =
         File(dir, CacheManager.safeName(coverArtId) + ".img").takeIf { it.isFile && it.length() > 0 }
 
+    /** One lock per cover, so a thumbnail request and a finished download never fetch the same cover twice. */
+    private val locks = ConcurrentHashMap<String, Any>()
+
     fun file(coverArtId: String): File? {
         cached(coverArtId)?.let { return it }
-        val f = File(dir, CacheManager.safeName(coverArtId) + ".img")
-        val bytes = try {
-            s.client()?.coverArt(coverArtId, 1024)
-        } catch (e: Exception) {
-            Log.w("CoverCache", "cover $coverArtId: $e")
-            null
-        } ?: return null
-        val tmp = File(dir, f.name + ".tmp")
-        tmp.writeBytes(bytes)
-        tmp.renameTo(f)
-        return f
+        val lock = locks.computeIfAbsent(coverArtId) { Any() }
+        try {
+            synchronized(lock) {
+                cached(coverArtId)?.let { return it } // fetched by another thread meanwhile
+                val f = File(dir, CacheManager.safeName(coverArtId) + ".img")
+                val bytes = try {
+                    s.client()?.coverArt(coverArtId, 1024)
+                } catch (e: Exception) {
+                    Log.w("CoverCache", "cover $coverArtId: $e")
+                    null
+                } ?: return null
+                val tmp = File.createTempFile(f.name, ".tmp", dir)
+                tmp.writeBytes(bytes)
+                if (!tmp.renameTo(f)) {
+                    tmp.delete()
+                    return cached(coverArtId)
+                }
+                return f
+            }
+        } finally {
+            locks.remove(coverArtId, lock)
+        }
+    }
+
+    fun clear() {
+        dir.listFiles()?.forEach { it.delete() }
     }
 }
 
@@ -62,7 +82,25 @@ class SyncManager(private val s: Services) {
         val artists = c.artists()
         progress("Loading albums…")
         val albums = c.albums()
-        val songs = c.songs { n -> progress("Loading songs… $n") }
+        val listed = c.songs { n -> progress("Loading songs… $n") }
+        // search3 with an empty query lists the whole library on Navidrome, but other servers may
+        // return nothing or only part of it. When it falls short of the albums' own song counts,
+        // ask album by album instead.
+        val expected = albums.sumOf { it.songCount }
+        val songs = if (expected > 0 && listed.size < expected * 95L / 100) {
+            val byAlbum = albums.flatMapIndexed { i, a ->
+                if (i % 20 == 0) progress("Loading songs by album… $i / ${albums.size}")
+                c.albumSongs(a.id)
+            }.distinctBy { it.id }
+            if (byAlbum.size > listed.size) byAlbum else listed
+        } else {
+            listed
+        }
+        // An empty listing would delete every song that isn't cached (and with it Poweramp's play
+        // counts and playlist entries). An empty server is far less likely than a broken answer.
+        if (songs.isEmpty() && (albums.isNotEmpty() || s.db.counts().songs > 0)) {
+            throw IOException("The server listed no songs, so the library on the phone was left as it is.")
+        }
         progress("Loading playlists…")
         val playlists = c.playlists()
         val radios = runCatching { c.radios() }.getOrDefault(emptyList())

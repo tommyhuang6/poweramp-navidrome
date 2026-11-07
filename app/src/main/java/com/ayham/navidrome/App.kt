@@ -68,10 +68,12 @@ class Services(val ctx: Context) {
     fun client(): SubsonicClient? {
         val s = settings
         if (s.serverUrl.isBlank() || s.token.isBlank()) return null
-        val key = "${s.serverUrl}|${s.username}|${s.salt}|${s.token}|${s.trustAllCerts}"
+        // The pin is in the key so that clearing it (the trust switch turned off and on) drops the client
+        // holding the old one. Filling it in on the first connection rebuilds the client once; harmless.
+        val key = "${s.serverUrl}|${s.username}|${s.salt}|${s.token}|${s.trustAllCerts}|${s.certPin}"
         cachedClient?.let { if (clientKey == key) return it }
         return synchronized(this) {
-            SubsonicClient(s.serverUrl, s.username, s.salt, s.token, s.trustAllCerts).also {
+            SubsonicClient(s.serverUrl, s.username, s.salt, s.token, s.trustAllCerts, s.certPin) { s.certPin = it }.also {
                 cachedClient = it
                 clientKey = key
             }
@@ -79,4 +81,17 @@ class Services(val ctx: Context) {
     }
 
     val authority: String get() = ctx.packageName + ".provider"
+
+    /**
+     * Logging in to a different server or user: the old library, cached songs, covers, ratings and
+     * unsent plays belong to the other account, so they go. Logging back in to the same account
+     * (e.g. after a password change) keeps everything.
+     */
+    fun forgetLibrary() {
+        cache.clear(keepOffline = false)
+        covers.clear()
+        db.clearLibrary()
+        scrobbler.reset()
+        sync.notifyChanged()
+    }
 }

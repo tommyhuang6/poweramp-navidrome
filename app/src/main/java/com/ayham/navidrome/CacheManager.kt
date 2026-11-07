@@ -131,7 +131,8 @@ class CacheManager(private val s: Services) {
         val count = when (s.settings.prefetch) {
             Prefetch.OFF -> return
             Prefetch.NEXT -> 1
-            Prefetch.ALBUM -> Int.MAX_VALUE
+            // "Downloads only on Wi-Fi": on mobile data fetch just the next song (enough for crossfade).
+            Prefetch.ALBUM -> if (s.settings.wifiOnlyDownloads && isMetered()) 1 else Int.MAX_VALUE
         }
         val list = s.db.albumSongs(song.albumId).filter { !it.removed }.map { it.song }
         val idx = list.indexOfFirst { it.id == song.id }

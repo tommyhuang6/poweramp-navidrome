@@ -259,7 +259,7 @@ class NavidromeProvider : DocumentsProvider() {
         if (s.settings.useAlbumSuffix) name + s.settings.albumSuffix else name
 
     private fun displayName(song: Song): String {
-        val num = if (song.track > 0) "%02d - ".format(song.track) else ""
+        val num = if (song.track > 0) String.format(java.util.Locale.ROOT, "%02d - ", song.track) else ""
         val ext = song.suffix.ifBlank { "audio" }
         return (num + song.title).replace('/', '_') + "." + ext
     }

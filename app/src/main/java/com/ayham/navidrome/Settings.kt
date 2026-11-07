@@ -26,6 +26,11 @@ class Settings(ctx: Context) {
         get() = p.getBoolean("trustAllCerts", false)
         set(v) = p.edit { putBoolean("trustAllCerts", v) }
 
+    /** SHA-256 of the server certificate pinned while [trustAllCerts] is on; blank = pin on next connection. */
+    var certPin: String
+        get() = p.getString("certPin", "")!!
+        set(v) = p.edit { putString("certPin", v) }
+
     /** Server line shown on the main card, e.g. "navidrome 0.64.2". */
     var serverVersion: String
         get() = p.getString("serverVersion", "")!!
@@ -68,7 +73,7 @@ class Settings(ctx: Context) {
     val isConfigured: Boolean get() = serverUrl.isNotBlank() && token.isNotBlank()
 
     fun logout() = p.edit {
-        remove("token"); remove("salt"); remove("serverVersion"); remove("lastSync")
+        remove("token"); remove("salt"); remove("serverVersion"); remove("lastSync"); remove("certPin")
     }
 }
 

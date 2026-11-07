@@ -140,8 +140,13 @@ class Scrobbler(private val s: Services) {
                 client.scrobble(songId, time, submission = true)
                 s.db.deleteScrobble(rowId)
             } catch (e: SubsonicException) {
+                if (e.isAuthError) {
+                    // Wrong password (changed on the server?): the play is fine, keep it for after the new login.
+                    Log.w(TAG, "login refused, ${s.db.pendingScrobbles().size} plays wait: $e")
+                    break
+                }
                 Log.w(TAG, "server refused $songId: $e")
-                s.db.deleteScrobble(rowId) // e.g. song deleted on the server: retrying won't help
+                s.db.deleteScrobble(rowId) // e.g. song deleted on the server (code 70): retrying won't help
             } catch (e: Exception) {
                 Log.w(TAG, "offline, ${s.db.pendingScrobbles().size} plays wait: $e")
                 break
@@ -149,6 +154,10 @@ class Scrobbler(private val s: Services) {
         }
         s.changed()
     }
+
+    /** Forgets the song in progress (another account was logged in). */
+    @Synchronized
+    fun reset() = p.edit { remove("songId"); putLong("playingSince", 0); putLong("playedMs", 0) }
 
     /** "@<authority>/…/tr%3A<songId>" → songId; null for local files and other providers. */
     private fun songIdFromPath(path: String): String? {

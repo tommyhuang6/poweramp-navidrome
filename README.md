@@ -2,7 +2,7 @@
 
 An Android plugin that puts your [Navidrome](https://www.navidrome.org/) library inside [Poweramp](https://powerampapp.com/). Your server's songs show up in Poweramp next to your local music, with tags, covers and lyrics. They stream from your server, stay on the phone once played, and keep working offline. Crossfade, the equalizer and everything else in Poweramp work as usual.
 
-It uses Poweramp's official [Track Provider API](https://github.com/maxmpz/powerampapi/tree/master/poweramp_provider_example), so there is no hack or patched Poweramp involved. Any Subsonic/OpenSubsonic server should work; it is tested with Navidrome 0.64.
+It uses Poweramp's official [Track Provider API](https://github.com/maxmpz/powerampapi/tree/master/poweramp_provider_example), so there is no hack or patched Poweramp involved. It is tested with Navidrome 0.64. Other Subsonic/OpenSubsonic servers should work too (when a server doesn't list its whole library in one search, the sync reads it album by album), but they are untested.
 
 ## Features
 
@@ -21,12 +21,14 @@ It uses Poweramp's official [Track Provider API](https://github.com/maxmpz/power
 
 Nothing it shouldn't. The app only reads your library, plus three calls that are the point of the features above: `scrobble`, `star`/`unstar` and `setRating`. Deleting or editing tags in Poweramp never reaches the server; Poweramp reports the action as failed and the song stays.
 
-Your password is not stored. The app keeps the Subsonic token (an MD5 of password + random salt) and the salt, as the Subsonic API requires.
+Your password is not stored. The app keeps the Subsonic token (an MD5 of password + random salt) and the salt, as the Subsonic API requires. That token works like a password, so use https outside your home network: an address typed without `http://` or `https://` is tried as https (plain http only for home-network addresses), and the app warns when a saved address sends it unencrypted over the internet.
+
+**Self-signed certificates.** "Accept untrusted HTTPS certificates" remembers the certificate your server shows on the first connection and refuses any other one afterwards. After renewing a self-signed certificate, turn the option off and on again.
 
 ## Install
 
 1. Download the APK from the [latest release](../../releases/latest) and install it. Android 8 or newer, Poweramp v3 (tested with build 1031).
-2. Open **Navidrome for Poweramp**, enter your server address, user and password, and wait for the first sync.
+2. Open **Navidrome for Poweramp**, enter your server address, user and password, and wait for the first sync. Logging in to a different server or user clears the old library and cache from the phone; logging in again to the same account (e.g. after a password change) keeps everything.
 3. Tap **Add to Poweramp Music Folders** and tick **Navidrome**. Poweramp scans it in a few seconds without downloading anything.
 4. Play. After changes on the server, open the app and tap **Sync library**; Poweramp rescans by itself.
 

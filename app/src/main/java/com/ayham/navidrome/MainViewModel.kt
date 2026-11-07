@@ -81,20 +81,52 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Checks the login with a ping before saving anything, then starts the first sync. */
+    /**
+     * Checks the login with a ping before saving anything, then starts the first sync. An address
+     * without http:// or https:// is tried as https first; plain http is tried only for LAN addresses.
+     */
     fun connect(url: String, user: String, password: String, trustAll: Boolean, onConnected: () -> Unit) {
         _state.update { it.copy(connecting = true, connectError = null) }
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
                 runCatching {
                     val (salt, token) = SubsonicClient.makeToken(password)
-                    val info = SubsonicClient(url, user.trim(), salt, token, trustAll).ping()
-                    s.settings.serverUrl = SubsonicClient.normalizeUrl(url)
-                    s.settings.username = user.trim()
-                    s.settings.salt = salt
-                    s.settings.token = token
-                    s.settings.trustAllCerts = trustAll
-                    s.settings.serverVersion = info.label
+                    val typed = url.trim()
+                    val candidates = if (SubsonicClient.hasScheme(typed)) listOf(typed)
+                    else listOfNotNull("https://$typed", "http://$typed".takeIf { SubsonicClient.isLocalAddress(typed) })
+                    var error: Exception? = null
+                    for (candidate in candidates) {
+                        var pin = ""
+                        val info = try {
+                            SubsonicClient(candidate, user.trim(), salt, token, trustAll) { pin = it }.ping()
+                        } catch (e: SubsonicException) {
+                            throw e // the server answered (e.g. wrong password): no other address to try
+                        } catch (e: Exception) {
+                            error = e
+                            continue
+                        }
+                        val newUrl = SubsonicClient.normalizeUrl(candidate)
+                        val st = s.settings
+                        val sameAccount = st.serverUrl.isBlank() ||
+                            (sameServer(st.serverUrl, newUrl) && st.username == user.trim())
+                        if (!sameAccount) s.forgetLibrary()
+                        st.serverUrl = newUrl
+                        st.username = user.trim()
+                        st.salt = salt
+                        st.token = token
+                        st.trustAllCerts = trustAll
+                        st.certPin = pin
+                        st.serverVersion = info.label
+                        return@runCatching
+                    }
+                    val e = error ?: java.io.IOException("No address to try")
+                    if (!SubsonicClient.hasScheme(typed) && !SubsonicClient.isLocalAddress(typed)) {
+                        throw java.io.IOException(
+                            "Could not reach https://$typed (${e.message}). If the server only speaks plain http, " +
+                                "type http:// in front; your login will then travel unencrypted.", e,
+                        )
+                    }
+                    throw e
                 }
             }
             _state.update { it.copy(connecting = false, connectError = result.exceptionOrNull()?.let { e -> e.message ?: e.toString() }) }
@@ -136,7 +168,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** Sends plays that waited while offline. */
     fun flushScrobbles() = io { if (s.settings.isConfigured) s.scrobbler.flush() }
 
+    /** Turning it on (again) pins the certificate the server presents next, e.g. after renewing it. */
     fun setTrustAll(on: Boolean) {
+        s.settings.certPin = ""
         s.settings.trustAllCerts = on
         refresh()
     }
@@ -193,6 +227,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 }
+
+/** Same server whether or not the address was saved with a trailing slash or a different scheme case. */
+private fun sameServer(a: String, b: String): Boolean =
+    SubsonicClient.normalizeUrl(a).equals(SubsonicClient.normalizeUrl(b), ignoreCase = true)
 
 fun formatBytes(b: Long): String = when {
     b >= 1L shl 30 -> "%.2f GB".format(b / (1L shl 30).toDouble())

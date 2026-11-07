@@ -196,7 +196,17 @@ private fun LoginCard(st: UiState, vm: MainViewModel, act: MainActivity.Actions)
         OutlinedTextField(pass, { pass = it }, Modifier.fillMaxWidth(), label = { Text("Password") }, singleLine = true,
             visualTransformation = PasswordVisualTransformation(),
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password))
+        Text(
+            "Without http:// or https://, https is used (plain http only for home-network addresses).",
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         SwitchRow("Accept untrusted HTTPS certificates", trust) { trust = it }
+        if (trust) {
+            Text(
+                "For self-signed certificates: the one the server shows now is remembered, and any other is refused.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         st.connectError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         PillButton(if (st.connecting) "Connecting…" else "Connect", filled = true,
             enabled = !st.connecting && url.isNotBlank() && user.isNotBlank() && pass.isNotEmpty()) {
@@ -211,6 +221,12 @@ private fun ConnectedCard(st: UiState, work: WorkStatus) {
         Text("Connected", fontSize = 30.sp, color = MaterialTheme.colorScheme.primary)
         if (st.serverVersion.isNotBlank()) Text(st.serverVersion, style = MaterialTheme.typography.titleLarge)
         Text(st.serverUrl, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (SubsonicClient.isInsecureRemote(st.serverUrl)) {
+            Text(
+                "Unencrypted connection over the internet: your login token can be read on the way. Use https.",
+                style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error,
+            )
+        }
         Text("User: ${st.username}", style = MaterialTheme.typography.titleLarge)
         val c = st.counts
         Text("${c.artists} artists · ${c.albums} albums · ${c.songs} songs", style = MaterialTheme.typography.titleLarge)

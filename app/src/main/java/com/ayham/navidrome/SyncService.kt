@@ -107,7 +107,13 @@ class SyncService : Service() {
         val failed = AtomicInteger(0)
         report("Downloading 0 / ${ids.size}")
         // CacheManager runs two downloads at a time; feed it in slices of two.
-        for (chunk in ids.chunked(2)) {
+        for ((i, chunk) in ids.chunked(2).withIndex()) {
+            // The phone may leave Wi-Fi during a long download: stop there instead of using mobile data.
+            if (s.settings.wifiOnlyDownloads && s.cache.isMetered()) {
+                s.sync.notifyChanged()
+                s.status.value = WorkStatus(running = false, message = "${ids.size - i * 2} offline songs wait for Wi-Fi")
+                return
+            }
             chunk.map { id ->
                 scope.async {
                     if (!s.cache.downloadNow(id)) failed.incrementAndGet()
