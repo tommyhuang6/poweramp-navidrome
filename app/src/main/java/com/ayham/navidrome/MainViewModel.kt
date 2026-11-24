@@ -23,7 +23,7 @@ data class UiState(
     val allOffline: Boolean = false,
     val prefetch: Prefetch = Prefetch.NEXT,
     val cacheLimitMb: Long = 0,
-    val useAlbumSuffix: Boolean = false,
+    val matchLocalAlbums: Boolean = false,
     val albumSuffix: String = "",
     val scrobble: Boolean = true,
     val pendingScrobbles: Int = 0,
@@ -65,7 +65,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     allOffline = ("all" to "") in s.db.pins(),
                     prefetch = st.prefetch,
                     cacheLimitMb = st.cacheLimitMb,
-                    useAlbumSuffix = st.useAlbumSuffix,
+                    matchLocalAlbums = st.matchLocalAlbums,
                     albumSuffix = st.albumSuffix,
                     scrobble = s.scrobbler.enabled,
                     pendingScrobbles = s.db.pendingScrobbles().size,
@@ -202,15 +202,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         s.cache.enforceLimit()
     }
 
-    /** The suffix changes every album name, so every song is marked modified for Poweramp's rescan. */
-    fun setAlbumSuffix(on: Boolean, suffix: String, onChanged: () -> Unit) {
-        val st = s.settings
-        if (st.useAlbumSuffix == on && st.albumSuffix == suffix) return
-        st.useAlbumSuffix = on
-        st.albumSuffix = suffix
-        io(after = onChanged) {
-            s.db.touchAllSongs()
-            s.sync.notifyChanged()
+    fun setAlbumMatching(on: Boolean, suffix: String = s.settings.albumSuffix, onChanged: () -> Unit) {
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) { runCatching { s.sync.configureAlbumMatching(on, suffix) } }
+            result.onSuccess { onChanged() }.onFailure { e ->
+                _state.update { it.copy(toast = e.message ?: "Could not read the Poweramp library") }
+            }
+            refresh()
         }
     }
 

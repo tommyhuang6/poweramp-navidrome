@@ -73,7 +73,10 @@ class LyricsRepo(private val s: Services) {
 }
 
 class SyncManager(private val s: Services) {
+    @Volatile private var coverRevision = 0L
+
     /** Full library sync. Throws on network or auth errors. */
+    @Synchronized
     fun run(progress: (String) -> Unit): LibraryDb.SyncResult {
         val c = s.client() ?: throw IllegalStateException("No server set up")
         progress("Contacting server…")
@@ -104,18 +107,41 @@ class SyncManager(private val s: Services) {
         progress("Loading playlists…")
         val playlists = c.playlists()
         val radios = runCatching { c.radios() }.getOrDefault(emptyList())
+        val local = if (s.settings.matchLocalAlbums) {
+            progress("Matching local albums…")
+            localAlbums()
+        } else null
         progress("Saving…")
-        val result = s.db.applySync(artists, albums, songs, s.db.completeCacheIds())
+        val result = s.db.applySync(artists, albums, songs, s.db.completeCacheIds(), local, s.settings.albumSuffix)
+        coverRevision++
         s.db.applyPlaylists(playlists, radios)
         s.settings.lastSync = System.currentTimeMillis()
         notifyChanged()
         return result
     }
 
+    private fun localAlbums(): LocalAlbums = try {
+        readLocalAlbums(s.ctx)
+    } catch (e: SecurityException) {
+        throw IOException("Poweramp library access is required. Tap Grant library access and try again.", e)
+    }
+
+    @Synchronized
+    fun configureAlbumMatching(enabled: Boolean, suffix: String) {
+        val effectiveSuffix = suffix.ifBlank { " · ND" }
+        s.db.updateAlbumDisplay(if (enabled) localAlbums() else null, effectiveSuffix)
+        coverRevision++
+        s.settings.matchLocalAlbums = enabled
+        s.settings.albumSuffix = effectiveSuffix
+        notifyChanged()
+    }
+
     /** Album and artist folder covers, so Poweramp's folder views keep their artwork offline. */
     fun prefetchFolderCovers(progress: (String) -> Unit) {
+        val revision = coverRevision
         val ids = s.db.folderCoverIds()
         ids.forEachIndexed { i, id ->
+            if (coverRevision != revision) return // Matching changed while a previous cover was downloading.
             if (i % 10 == 0) progress("Covers… $i / ${ids.size}")
             s.covers.file(id)
         }

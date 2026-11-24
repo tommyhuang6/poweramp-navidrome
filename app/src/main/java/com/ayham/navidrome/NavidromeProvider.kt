@@ -67,11 +67,11 @@ class NavidromeProvider : DocumentsProvider() {
                 documentId.startsWith(ALBUM) -> {
                     val (f, _) = s.db.albumFolder(documentId.removePrefix(ALBUM)) ?: throw FileNotFoundException(documentId)
                     val c = MatrixCursor(projection ?: DOCUMENT_PROJECTION)
-                    folderRow(c, documentId, albumName(f.name), f.modified, true, TrackProviderConsts.FLAG_NO_SUBDIRS)
+                    folderRow(c, documentId, f.name, f.modified, true, TrackProviderConsts.FLAG_NO_SUBDIRS)
                     return c
                 }
                 documentId.startsWith(TRACK) -> {
-                    val row = s.db.song(documentId.removePrefix(TRACK)) ?: throw FileNotFoundException(documentId)
+                    val row = s.db.song(documentId.removePrefix(TRACK))?.takeIf { it.localPath == null } ?: throw FileNotFoundException(documentId)
                     val proj = projection ?: TRACK_PROJECTION
                     val c = MatrixCursor(proj)
                     trackRow(c, row, proj)
@@ -123,9 +123,9 @@ class NavidromeProvider : DocumentsProvider() {
                 }
                 parentDocumentId.startsWith(ARTIST) ->
                     for (f in s.db.albumFolders(parentDocumentId.removePrefix(ARTIST)))
-                        folderRow(c, ALBUM + f.id, albumName(f.name), f.modified, true, TrackProviderConsts.FLAG_NO_SUBDIRS)
+                        folderRow(c, ALBUM + f.id, f.name, f.modified, true, TrackProviderConsts.FLAG_NO_SUBDIRS)
                 parentDocumentId.startsWith(ALBUM) ->
-                    for (row in s.db.albumSongs(parentDocumentId.removePrefix(ALBUM))) trackRow(c, row, proj)
+                    for (row in s.db.albumSongs(parentDocumentId.removePrefix(ALBUM), visibleOnly = true)) trackRow(c, row, proj)
             }
         } catch (e: Exception) {
             Log.e(TAG, "queryChildDocuments $parentDocumentId", e)
@@ -136,22 +136,22 @@ class NavidromeProvider : DocumentsProvider() {
     override fun isChildDocument(parentDocumentId: String, documentId: String): Boolean = try {
         when {
             parentDocumentId == documentId -> true
-            parentDocumentId == ROOT_DOC -> documentId.startsWith(ARTIST) || documentId.startsWith(ALBUM) ||
-                documentId.startsWith(TRACK) || documentId == PLAYLISTS_DIR || documentId.startsWith(PLAYLIST) || documentId == RADIO_DOC
-            parentDocumentId == PLAYLISTS_DIR -> documentId.startsWith(PLAYLIST) || documentId == RADIO_DOC
-            parentDocumentId.startsWith(ARTIST) -> {
-                val artistId = parentDocumentId.removePrefix(ARTIST)
-                when {
-                    documentId.startsWith(ALBUM) -> s.db.albumFolder(documentId.removePrefix(ALBUM))?.second == artistId
-                    documentId.startsWith(TRACK) -> {
-                        val albumId = s.db.song(documentId.removePrefix(TRACK))?.song?.albumId
-                        albumId != null && s.db.albumFolder(albumId)?.second == artistId
-                    }
+            documentId.startsWith(TRACK) -> {
+                val row = s.db.song(documentId.removePrefix(TRACK))
+                row != null && row.localPath == null && when {
+                    parentDocumentId == ROOT_DOC -> true
+                    parentDocumentId.startsWith(ALBUM) -> row.song.albumId == parentDocumentId.removePrefix(ALBUM)
+                    parentDocumentId.startsWith(ARTIST) -> s.db.albumFolder(row.song.albumId)?.second == parentDocumentId.removePrefix(ARTIST)
                     else -> false
                 }
             }
-            parentDocumentId.startsWith(ALBUM) ->
-                documentId.startsWith(TRACK) && s.db.song(documentId.removePrefix(TRACK))?.song?.albumId == parentDocumentId.removePrefix(ALBUM)
+            documentId.startsWith(ALBUM) -> {
+                val folder = s.db.albumFolder(documentId.removePrefix(ALBUM))
+                folder != null && (parentDocumentId == ROOT_DOC || parentDocumentId == ARTIST + folder.second)
+            }
+            parentDocumentId == ROOT_DOC -> (documentId.startsWith(ARTIST) && s.db.artistFolder(documentId.removePrefix(ARTIST)) != null) ||
+                documentId == PLAYLISTS_DIR || documentId.startsWith(PLAYLIST) || documentId == RADIO_DOC
+            parentDocumentId == PLAYLISTS_DIR -> documentId.startsWith(PLAYLIST) || documentId == RADIO_DOC
             else -> false
         }
     } catch (e: Exception) {
@@ -212,7 +212,7 @@ class NavidromeProvider : DocumentsProvider() {
             for (row in s.db.playlistSongs(documentId.removePrefix(PLAYLIST))) {
                 val song = row.song
                 appendLine("#EXTINF:" + song.durationMs / 1000 + "," + song.artist + " - " + song.title)
-                appendLine(Uri.encode(TRACK + song.id))
+                appendLine(row.localPath ?: Uri.encode(TRACK + song.id))
             }
         }
     }
@@ -233,7 +233,7 @@ class NavidromeProvider : DocumentsProvider() {
         r.add(MediaStore.MediaColumns.TITLE, song.title)
         r.add(MediaStore.Audio.AudioColumns.DURATION, song.durationMs)
         r.add(MediaStore.Audio.AudioColumns.ARTIST, song.artist)
-        r.add(MediaStore.Audio.AudioColumns.ALBUM, albumName(song.album))
+        r.add(MediaStore.Audio.AudioColumns.ALBUM, song.album + row.displaySuffix)
         if (song.year > 0) r.add(MediaStore.Audio.AudioColumns.YEAR, song.year)
         r.add(TrackProviderConsts.COLUMN_ALBUM_ARTIST, song.albumArtist.ifBlank { song.artist })
         if (song.genre.isNotBlank()) r.add(TrackProviderConsts.COLUMN_GENRE, song.genre)
@@ -254,9 +254,6 @@ class NavidromeProvider : DocumentsProvider() {
             }
         }
     }
-
-    private fun albumName(name: String): String =
-        if (s.settings.useAlbumSuffix) name + s.settings.albumSuffix else name
 
     private fun displayName(song: Song): String {
         val num = if (song.track > 0) String.format(java.util.Locale.ROOT, "%02d - ", song.track) else ""
@@ -300,8 +297,7 @@ class NavidromeProvider : DocumentsProvider() {
     override fun openDocumentThumbnail(documentId: String, sizeHint: Point?, signal: CancellationSignal?): AssetFileDescriptor {
         val coverIds = when {
             // The album cover is the fallback, e.g. offline when only the album's cover is cached.
-            documentId.startsWith(TRACK) -> s.db.song(documentId.removePrefix(TRACK))?.song
-                ?.let { listOfNotNull(it.coverArt, s.db.albumCoverArt(it.albumId)).distinct() }.orEmpty()
+            documentId.startsWith(TRACK) -> s.db.trackCoverIds(documentId.removePrefix(TRACK))
             documentId.startsWith(ALBUM) -> listOfNotNull(s.db.albumCoverArt(documentId.removePrefix(ALBUM)))
             documentId.startsWith(ARTIST) -> listOfNotNull(s.db.artistCoverArt(documentId.removePrefix(ARTIST)))
             else -> emptyList()

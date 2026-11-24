@@ -1,5 +1,7 @@
 package com.ayham.navidrome
 
+import android.content.ComponentName
+import android.content.Intent
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
@@ -54,6 +56,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.maxmpz.poweramp.player.PowerampAPI
+import com.maxmpz.poweramp.player.PowerampAPIHelper
 import java.text.DateFormat
 import java.util.Date
 
@@ -62,6 +66,11 @@ class MainActivity : ComponentActivity() {
 
     private val notificationPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
+
+    private val libraryPermission = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        // Poweramp grants access to its provider; the activity result code is not the grant.
+        vm.setAlbumMatching(true) { PowerampBridge.rescan(this) }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -91,6 +100,13 @@ class MainActivity : ComponentActivity() {
         fun musicFolders() = PowerampBridge.openMusicFolders(a)
         fun battery() = PowerampBridge.requestBatteryExemption(a)
         fun toast(msg: String) = Toast.makeText(a, msg, Toast.LENGTH_SHORT).show()
+        fun grantLibraryAccess() {
+            val pkg = PowerampAPIHelper.getPowerampPackageName(a) ?: return toast("Install Poweramp to match local albums")
+            val intent = Intent(PowerampAPI.ACTION_ASK_FOR_DATA_PERMISSION)
+                .setComponent(ComponentName(pkg, PowerampAPI.API_ACTIVITY_NAME))
+                .putExtra(PowerampAPI.EXTRA_PACKAGE, a.packageName)
+            runCatching { libraryPermission.launch(intent) }.onFailure { toast("Could not open Poweramp") }
+        }
         fun askNotifications() {
             if (Build.VERSION.SDK_INT >= 33 &&
                 a.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
@@ -229,7 +245,13 @@ private fun ConnectedCard(st: UiState, work: WorkStatus) {
         }
         Text("User: ${st.username}", style = MaterialTheme.typography.titleLarge)
         val c = st.counts
-        Text("${c.artists} artists · ${c.albums} albums · ${c.songs} songs", style = MaterialTheme.typography.titleLarge)
+        val visibleLabel = if (st.matchLocalAlbums) "Visible: " else ""
+        Text("${visibleLabel}${c.artists - c.hiddenArtists} artists · ${c.albums - c.hiddenAlbums} albums · ${c.songs - c.hiddenSongs} songs",
+            style = MaterialTheme.typography.titleLarge)
+        if (st.matchLocalAlbums) {
+            Text("Hidden: ${c.hiddenArtists} artists · ${c.hiddenAlbums} albums · ${c.hiddenSongs} songs",
+                style = MaterialTheme.typography.bodyMedium)
+        }
         if (c.playlists + c.radios > 0) {
             Text("${c.playlists} playlists · ${c.radios} radio stations", style = MaterialTheme.typography.bodyLarge)
         }
@@ -325,16 +347,21 @@ private fun AlbumRow(a: AlbumSummary, onPin: (Boolean) -> Unit) {
 private fun SeparateCard(st: UiState, vm: MainViewModel, act: MainActivity.Actions) {
     var suffix by remember(st.albumSuffix) { mutableStateOf(st.albumSuffix) }
     InfoCard {
-        Text("Keep apart from local songs", style = MaterialTheme.typography.headlineSmall)
+        Text("Local albums", style = MaterialTheme.typography.headlineSmall)
         Text(
-            "Poweramp merges albums with the same name. Untick your local music folder in Poweramp, or add a " +
-                "suffix so Navidrome albums show separately.",
+            "Fully matched albums are hidden. Partially matched albums keep every song and get a suffix. " +
+                "Cloud-only albums keep their original names.",
             style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        SwitchRow("Add suffix to album names", st.useAlbumSuffix) { on -> vm.setAlbumSuffix(on, suffix) { act.rescan() } }
-        if (st.useAlbumSuffix) {
-            OutlinedTextField(suffix, { suffix = it }, Modifier.fillMaxWidth(), label = { Text("Suffix") }, singleLine = true)
-            PillButton("Apply suffix") { vm.setAlbumSuffix(true, suffix) { act.rescan() } }
+        SwitchRow("Match local albums", st.matchLocalAlbums) { on ->
+            if (on) act.grantLibraryAccess() else vm.setAlbumMatching(false) { act.rescan() }
+        }
+        if (st.matchLocalAlbums) {
+            OutlinedTextField(suffix, { suffix = it }, Modifier.fillMaxWidth(), label = { Text("Partial album suffix") }, singleLine = true)
+            PillButton("Refresh local matches") {
+                vm.setAlbumMatching(true, suffix) { act.rescan() }
+            }
+            PillButton("Grant library access") { act.grantLibraryAccess() }
         }
     }
 }

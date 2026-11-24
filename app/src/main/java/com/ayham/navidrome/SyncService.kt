@@ -86,6 +86,7 @@ class SyncService : Service() {
         s.sync.prefetchFolderCovers { msg -> report(msg) }
         val parts = buildList {
             add("${r.added} new")
+            if (s.settings.matchLocalAlbums) add("${r.rematchedAlbums} albums rechecked")
             if (r.changed > 0) add("${r.changed} updated")
             if (r.removedKept > 0) add("${r.removedKept} removed on server (kept, cached)")
             if (r.removedDropped > 0) add("${r.removedDropped} removed")

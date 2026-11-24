@@ -13,6 +13,8 @@ data class SongRow(
     val removed: Boolean,
     /** -1 unknown, 0 none, 1 has lyrics */
     val hasLyrics: Int,
+    val displaySuffix: String,
+    val localPath: String?,
 )
 
 data class FolderRow(val id: String, val name: String, val coverArt: String?, val modified: Long, val removed: Boolean)
@@ -45,13 +47,16 @@ data class LibraryCounts(
     val removed: Int,
     val playlists: Int = 0,
     val radios: Int = 0,
+    val hiddenArtists: Int = 0,
+    val hiddenAlbums: Int = 0,
+    val hiddenSongs: Int = 0,
 )
 
 /**
  * Local copy of the library. The provider answers Poweramp only from here, so scans never wait on
  * the network.
  */
-class LibraryDb(ctx: Context) : SQLiteOpenHelper(ctx, "library.db", null, 7) {
+class LibraryDb(ctx: Context) : SQLiteOpenHelper(ctx, "library.db", null, 10) {
     private val meta = ctx.getSharedPreferences("library_meta", Context.MODE_PRIVATE)
 
     /** Set by an upgrade that needs Poweramp to rescan (see onUpgrade). */
@@ -70,7 +75,7 @@ class LibraryDb(ctx: Context) : SQLiteOpenHelper(ctx, "library.db", null, 7) {
                 albumArtist TEXT, track INTEGER, disc INTEGER, year INTEGER, genre TEXT, duration INTEGER,
                 size INTEGER, suffix TEXT, contentType TEXT, bitRate INTEGER, bitDepth INTEGER, coverArt TEXT,
                 metaHash TEXT, modified INTEGER, removed INTEGER DEFAULT 0, hasLyrics INTEGER DEFAULT -1,
-                seen INTEGER DEFAULT 1)"""
+                seen INTEGER DEFAULT 1, displaySuffix TEXT NOT NULL DEFAULT '', localPath TEXT)"""
         )
         db.execSQL("CREATE INDEX songs_album ON songs(albumId)")
         db.execSQL(
@@ -90,18 +95,35 @@ class LibraryDb(ctx: Context) : SQLiteOpenHelper(ctx, "library.db", null, 7) {
         db.execSQL("CREATE TABLE lyrics(songId TEXT PRIMARY KEY, synced TEXT, plain TEXT, fetched INTEGER)")
         createScrobbles(db)
         createPlaylistsAndRatings(db)
+        createMatchCache(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         if (oldVersion < 2) createScrobbles(db)
         if (oldVersion < 3) createPlaylistsAndRatings(db)
-        // v7: earlier builds moved only the changed songs' modified time, and Poweramp then reset the
-        // other titles of those albums to file names. Marking every song modified makes Poweramp fetch
-        // all tags again (see applySync).
-        if (oldVersion < 7) {
+        if (oldVersion < 8) {
+            db.execSQL("ALTER TABLE songs ADD COLUMN displaySuffix TEXT NOT NULL DEFAULT ''")
+            db.execSQL("ALTER TABLE songs ADD COLUMN localPath TEXT")
+            // Refresh all tags, including the legacy global album suffix on upgrades from v7.
             db.execSQL("UPDATE songs SET modified = ?", arrayOf(System.currentTimeMillis()))
             resendTags = true
         }
+        if (oldVersion < 9) {
+            createMatchCache(db)
+            // Older classifications did not check format and size.
+            db.execSQL("UPDATE songs SET localPath = NULL, displaySuffix = '', modified = ? " +
+                "WHERE localPath IS NOT NULL OR displaySuffix != ''", arrayOf(System.currentTimeMillis()))
+            resendTags = true
+        }
+        if (oldVersion == 9) db.delete("album_match_inputs", null, null) // Recheck size-based results on the next match.
+    }
+
+    private fun createMatchCache(db: SQLiteDatabase) {
+        db.execSQL("""CREATE TABLE album_match_inputs(albumId TEXT NOT NULL, album TEXT NOT NULL,
+            digest TEXT NOT NULL, PRIMARY KEY(albumId, album))""")
+        // Cache eviction can delete retained songs outside a sync.
+        db.execSQL("""CREATE TRIGGER invalidate_deleted_track AFTER DELETE ON songs BEGIN
+            DELETE FROM album_match_inputs WHERE albumId = OLD.albumId; END""")
     }
 
     private fun createPlaylistsAndRatings(db: SQLiteDatabase) {
@@ -121,7 +143,7 @@ class LibraryDb(ctx: Context) : SQLiteOpenHelper(ctx, "library.db", null, 7) {
 
     private val songCols = "s.id, s.title, s.artist, s.album, s.albumId, s.artistId, s.albumArtist, s.track, " +
         "s.disc, s.year, s.genre, s.duration, s.size, s.suffix, s.contentType, s.bitRate, s.bitDepth, " +
-        "s.coverArt, s.modified, s.removed, s.hasLyrics"
+        "s.coverArt, s.modified, s.removed, s.hasLyrics, s.displaySuffix, s.localPath"
 
     private fun Cursor.toSongRow() = SongRow(
         Song(
@@ -132,6 +154,7 @@ class LibraryDb(ctx: Context) : SQLiteOpenHelper(ctx, "library.db", null, 7) {
             contentType = getString(14) ?: "", bitRate = getInt(15), bitDepth = getInt(16), coverArt = getString(17),
         ),
         modified = getLong(18), removed = getInt(19) != 0, hasLyrics = getInt(20),
+        displaySuffix = getString(21), localPath = getString(22),
     )
 
     fun song(id: String): SongRow? =
@@ -139,9 +162,10 @@ class LibraryDb(ctx: Context) : SQLiteOpenHelper(ctx, "library.db", null, 7) {
             if (it.moveToFirst()) it.toSongRow() else null
         }
 
-    fun albumSongs(albumId: String): List<SongRow> =
+    fun albumSongs(albumId: String, visibleOnly: Boolean = false): List<SongRow> =
         readableDatabase.rawQuery(
-            "SELECT $songCols FROM songs s WHERE s.albumId = ? ORDER BY s.disc, s.track, s.title COLLATE NOCASE",
+            "SELECT $songCols FROM songs s WHERE s.albumId = ? " +
+                (if (visibleOnly) "AND s.localPath IS NULL " else "") + "ORDER BY s.disc, s.track, s.title COLLATE NOCASE",
             arrayOf(albumId),
         ).use { c -> buildList { while (c.moveToNext()) add(c.toSongRow()) } }
 
@@ -154,11 +178,6 @@ class LibraryDb(ctx: Context) : SQLiteOpenHelper(ctx, "library.db", null, 7) {
         writableDatabase.execSQL("UPDATE songs SET hasLyrics = ? WHERE id = ?", arrayOf<Any>(if (has) 1 else 0, songId))
     }
 
-    /** Makes Poweramp re-read every song (used when the album-suffix option changes). */
-    fun touchAllSongs() {
-        writableDatabase.execSQL("UPDATE songs SET modified = ?", arrayOf(System.currentTimeMillis()))
-    }
-
     // ---------------------------------------------------------------- folders
 
     /** Artists that still have at least one song, with the newest song change for LAST_MODIFIED. */
@@ -168,7 +187,7 @@ class LibraryDb(ctx: Context) : SQLiteOpenHelper(ctx, "library.db", null, 7) {
                       MIN(COALESCE(ar.removed, 0))
                FROM albums al JOIN songs s ON s.albumId = al.id
                LEFT JOIN artists ar ON ar.id = al.artistId
-               GROUP BY al.artistId ORDER BY 2 COLLATE NOCASE""",
+               GROUP BY al.artistId HAVING COUNT(*) > COUNT(s.localPath) ORDER BY 2 COLLATE NOCASE""",
             null,
         ).use { c ->
             buildList {
@@ -180,9 +199,9 @@ class LibraryDb(ctx: Context) : SQLiteOpenHelper(ctx, "library.db", null, 7) {
 
     fun albumFolders(artistId: String): List<FolderRow> =
         readableDatabase.rawQuery(
-            """SELECT al.id, al.name, al.coverArt, MAX(s.modified), al.removed
+            """SELECT al.id, al.name || MAX(s.displaySuffix), al.coverArt, MAX(s.modified), al.removed
                FROM albums al JOIN songs s ON s.albumId = al.id
-               WHERE COALESCE(al.artistId, '') = ? GROUP BY al.id ORDER BY al.year, al.name COLLATE NOCASE""",
+               WHERE COALESCE(al.artistId, '') = ? GROUP BY al.id HAVING COUNT(*) > COUNT(s.localPath) ORDER BY al.year, al.name COLLATE NOCASE""",
             arrayOf(artistId),
         ).use { c ->
             buildList { while (c.moveToNext()) add(FolderRow(c.getString(0), c.getString(1) ?: "", c.getString(2), c.getLong(3), c.getInt(4) != 0)) }
@@ -190,8 +209,8 @@ class LibraryDb(ctx: Context) : SQLiteOpenHelper(ctx, "library.db", null, 7) {
 
     fun albumFolder(albumId: String): Pair<FolderRow, String>? =
         readableDatabase.rawQuery(
-            """SELECT al.id, al.name, al.coverArt, MAX(s.modified), al.removed, COALESCE(al.artistId, '')
-               FROM albums al JOIN songs s ON s.albumId = al.id WHERE al.id = ? GROUP BY al.id""",
+            """SELECT al.id, al.name || MAX(s.displaySuffix), al.coverArt, MAX(s.modified), al.removed, COALESCE(al.artistId, '')
+               FROM albums al JOIN songs s ON s.albumId = al.id WHERE al.id = ? GROUP BY al.id HAVING COUNT(*) > COUNT(s.localPath)""",
             arrayOf(albumId),
         ).use { c ->
             if (!c.moveToFirst()) null
@@ -201,42 +220,61 @@ class LibraryDb(ctx: Context) : SQLiteOpenHelper(ctx, "library.db", null, 7) {
     fun rootModified(): Long =
         readableDatabase.rawQuery("SELECT MAX(modified) FROM songs", null).use { if (it.moveToFirst()) it.getLong(0) else 0 }
 
+    private val visibleAlbumsSql = """
+        SELECT al.id, al.artistId, al.coverArt FROM albums al
+        WHERE EXISTS (SELECT 1 FROM songs s WHERE s.albumId = al.id AND s.localPath IS NULL)
+    """.trimIndent()
+
     fun artistCoverArt(artistId: String): String? =
         readableDatabase.rawQuery(
-            "SELECT COALESCE(ar.coverArt, (SELECT coverArt FROM albums WHERE artistId = ? AND coverArt IS NOT NULL LIMIT 1)) " +
-                "FROM (SELECT 1) LEFT JOIN artists ar ON ar.id = ?",
-            arrayOf(artistId, artistId),
+            """SELECT COALESCE(ar.coverArt, al.coverArt) FROM ($visibleAlbumsSql) al
+               LEFT JOIN artists ar ON ar.id = al.artistId
+               WHERE COALESCE(al.artistId, '') = ? AND COALESCE(ar.coverArt, al.coverArt) IS NOT NULL
+               ORDER BY al.id LIMIT 1""",
+            arrayOf(artistId),
         ).use { if (it.moveToFirst()) it.getString(0) else null }
 
-    /** Cover ids of every album and artist folder Poweramp can show (artists fall back to an album cover). */
+    /** Only folders with visible songs contribute artwork. UNION also deduplicates shared covers. */
     fun folderCoverIds(): List<String> =
         readableDatabase.rawQuery(
-            """SELECT coverArt FROM albums WHERE coverArt IS NOT NULL AND id IN (SELECT albumId FROM songs)
-               UNION SELECT coverArt FROM artists WHERE coverArt IS NOT NULL""",
+            """WITH visible AS ($visibleAlbumsSql)
+               SELECT coverArt FROM visible WHERE coverArt IS NOT NULL
+               UNION SELECT ar.coverArt FROM artists ar JOIN visible ON visible.artistId = ar.id
+               WHERE ar.coverArt IS NOT NULL""",
             null,
         ).use { c -> buildList { while (c.moveToNext()) add(c.getString(0)) } }
 
     fun albumCoverArt(albumId: String): String? =
-        readableDatabase.rawQuery("SELECT coverArt FROM albums WHERE id = ?", arrayOf(albumId)).use {
+        readableDatabase.rawQuery("SELECT coverArt FROM ($visibleAlbumsSql) WHERE id = ?", arrayOf(albumId)).use {
             if (it.moveToFirst()) it.getString(0) else null
         }
 
+    fun trackCoverIds(songId: String): List<String> =
+        readableDatabase.rawQuery(
+            """SELECT s.coverArt, al.coverArt FROM songs s LEFT JOIN albums al ON al.id = s.albumId
+               WHERE s.id = ? AND s.localPath IS NULL""",
+            arrayOf(songId),
+        ).use { c -> if (c.moveToFirst()) listOfNotNull(c.getString(0), c.getString(1)).distinct() else emptyList() }
+
     // ---------------------------------------------------------------- sync
 
-    class SyncResult(val added: Int, val changed: Int, val removedKept: Int, val removedDropped: Int, val staleFiles: Int)
+    class SyncResult(val added: Int, val changed: Int, val removedKept: Int, val removedDropped: Int, val staleFiles: Int, val rematchedAlbums: Int)
 
     /**
      * Merges a full server listing. Songs gone from the server stay (marked removed) if they are
      * cached, otherwise they are dropped. A song whose file changed keeps its old cached copy, marked
      * stale, until the new one has downloaded.
      */
-    fun applySync(artists: List<Artist>, albums: List<Album>, songs: List<Song>, cachedIds: Set<String>): SyncResult {
+    internal fun applySync(
+        artists: List<Artist>, albums: List<Album>, songs: List<Song>, cachedIds: Set<String>,
+        local: LocalAlbums?, suffix: String,
+    ): SyncResult {
         val db = writableDatabase
         val now = System.currentTimeMillis()
         var added = 0; var changed = 0; var kept = 0; var dropped = 0; var stale = 0
+        val rematched: Int
         db.beginTransaction()
         try {
-            db.execSQL("UPDATE songs SET seen = 0")
             db.execSQL("UPDATE albums SET seen = 0")
             db.execSQL("UPDATE artists SET seen = 0")
 
@@ -252,28 +290,26 @@ class LibraryDb(ctx: Context) : SQLiteOpenHelper(ctx, "library.db", null, 7) {
                 }, SQLiteDatabase.CONFLICT_REPLACE)
             }
 
-            val old = HashMap<String, Triple<String, Long, String>>() // id -> (metaHash, size, suffix)
-            val oldAlbum = HashMap<String, String>()
-            db.rawQuery("SELECT id, metaHash, size, suffix, albumId FROM songs", null).use { c ->
+            // Compare the full server metadata. Most rows on a repeat sync need no write at all.
+            val pending = songs.associateByTo(LinkedHashMap()) { it.id }
+            val previous = mutableMapOf<String, SongRow>()
+            db.rawQuery("SELECT $songCols FROM songs s", null).use { c ->
                 while (c.moveToNext()) {
-                    old[c.getString(0)] = Triple(c.getString(1) ?: "", c.getLong(2), c.getString(3) ?: "")
-                    oldAlbum[c.getString(0)] = c.getString(4) ?: ""
+                    val row = c.toSongRow()
+                    if (!row.removed && pending[row.song.id] == row.song) pending.remove(row.song.id)
+                    else previous[row.song.id] = row
                 }
             }
-            // Albums with any added, changed or removed song. When Poweramp re-lists an album folder it
-            // resets the title of every track in it to the file name, but asks for tags again only for
-            // tracks whose modified time moved. So every song of such an album gets a new modified time.
             val touchedAlbums = HashSet<String>()
-            for (s in songs) {
-                val prev = old[s.id]
-                val hash = s.metaHash
+            for (s in pending.values) {
+                val prev = previous.remove(s.id)
                 val cv = ContentValues().apply {
                     put("title", s.title); put("artist", s.artist); put("album", s.album); put("albumId", s.albumId)
                     put("artistId", s.artistId); put("albumArtist", s.albumArtist); put("track", s.track)
                     put("disc", s.disc); put("year", s.year); put("genre", s.genre); put("duration", s.durationMs)
                     put("size", s.size); put("suffix", s.suffix); put("contentType", s.contentType)
                     put("bitRate", s.bitRate); put("bitDepth", s.bitDepth); put("coverArt", s.coverArt)
-                    put("metaHash", hash); put("removed", 0); put("seen", 1)
+                    put("metaHash", s.metaHash); put("removed", 0); put("seen", 1)
                 }
                 if (prev == null) {
                     cv.put("id", s.id); cv.put("modified", now)
@@ -281,13 +317,11 @@ class LibraryDb(ctx: Context) : SQLiteOpenHelper(ctx, "library.db", null, 7) {
                     added++
                     touchedAlbums += s.albumId
                 } else {
-                    if (prev.first != hash) {
-                        cv.put("modified", now)
-                        changed++
-                        touchedAlbums += s.albumId
-                        oldAlbum[s.id]?.let { touchedAlbums += it }
-                    }
-                    if ((prev.second != s.size || prev.third != s.suffix) && s.id in cachedIds) {
+                    cv.put("modified", now)
+                    changed++
+                    touchedAlbums += s.albumId
+                    touchedAlbums += prev.song.albumId
+                    if ((prev.song.size != s.size || prev.song.suffix != s.suffix) && s.id in cachedIds) {
                         db.execSQL("UPDATE cache SET stale = 1 WHERE songId = ?", arrayOf(s.id))
                         stale++
                     }
@@ -296,24 +330,20 @@ class LibraryDb(ctx: Context) : SQLiteOpenHelper(ctx, "library.db", null, 7) {
             }
 
             // Songs no longer on the server.
-            db.rawQuery("SELECT id, removed FROM songs WHERE seen = 0", null).use { c ->
-                val gone = buildList { while (c.moveToNext()) add(c.getString(0) to (c.getInt(1) != 0)) }
-                for ((id, wasRemoved) in gone) {
-                    if (id in cachedIds) {
-                        if (!wasRemoved) {
-                            db.execSQL("UPDATE songs SET removed = 1, modified = ? WHERE id = ?", arrayOf(now, id))
-                            kept++
-                            oldAlbum[id]?.let { touchedAlbums += it }
-                        }
-                    } else {
-                        db.delete("songs", "id = ?", arrayOf(id))
-                        db.delete("lyrics", "songId = ?", arrayOf(id))
-                        dropped++
-                        oldAlbum[id]?.let { touchedAlbums += it }
-                    }
+            for ((id, row) in previous) {
+                if (id in cachedIds) {
+                    if (row.removed) continue
+                    db.execSQL("UPDATE songs SET removed = 1, modified = ? WHERE id = ?", arrayOf<Any>(now, id))
+                    kept++
+                } else {
+                    db.delete("songs", "id = ?", arrayOf(id))
+                    db.delete("lyrics", "songId = ?", arrayOf(id))
+                    dropped++
                 }
+                touchedAlbums += row.song.albumId
             }
             for (albumId in touchedAlbums) {
+                db.delete("album_match_inputs", "albumId = ?", arrayOf(albumId))
                 db.execSQL("UPDATE songs SET modified = ? WHERE albumId = ?", arrayOf<Any>(now, albumId))
             }
             // Albums/artists gone from the server stay only while kept songs still need them.
@@ -321,11 +351,81 @@ class LibraryDb(ctx: Context) : SQLiteOpenHelper(ctx, "library.db", null, 7) {
             db.execSQL("DELETE FROM albums WHERE seen = 0 AND id NOT IN (SELECT albumId FROM songs)")
             db.execSQL("UPDATE artists SET removed = 1 WHERE seen = 0")
             db.execSQL("DELETE FROM artists WHERE seen = 0 AND id NOT IN (SELECT artistId FROM albums)")
+            rematched = updateAlbumDisplay(db, local, suffix, now)
             db.setTransactionSuccessful()
         } finally {
             db.endTransaction()
         }
-        return SyncResult(added, changed, kept, dropped, stale)
+        return SyncResult(added, changed, kept, dropped, stale, rematched)
+    }
+
+    internal fun updateAlbumDisplay(local: LocalAlbums?, suffix: String) {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            updateAlbumDisplay(db, local, suffix, System.currentTimeMillis())
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    private fun updateAlbumDisplay(db: SQLiteDatabase, local: LocalAlbums?, suffix: String, now: Long): Int {
+        if (local == null) {
+            db.execSQL("UPDATE songs SET localPath = NULL, displaySuffix = '', modified = ? " +
+                "WHERE localPath IS NOT NULL OR displaySuffix != ''", arrayOf(now))
+            db.delete("album_match_inputs", null, null)
+            return 0
+        }
+
+        val dirty = mutableSetOf<String>()
+        db.rawQuery("""SELECT a.id FROM albums a WHERE NOT EXISTS
+            (SELECT 1 FROM album_match_inputs i WHERE i.albumId = a.id)
+            AND EXISTS (SELECT 1 FROM songs s WHERE s.albumId = a.id)""", null).use { c ->
+            while (c.moveToNext()) dirty += c.getString(0)
+        }
+        db.rawQuery("SELECT albumId, album, digest FROM album_match_inputs", null).use { c ->
+            while (c.moveToNext()) if (local.digest(c.getString(1)) != c.getString(2)) dirty += c.getString(0)
+        }
+        db.execSQL("UPDATE songs SET displaySuffix = ?, modified = ? WHERE displaySuffix != '' AND displaySuffix != ?",
+            arrayOf<Any>(suffix, now, suffix))
+        // Keep each query below Android SQLite's bind parameter limit, including the first full pass.
+        for (ids in dirty.chunked(400)) matchAlbums(db, ids, local, suffix, now)
+        return dirty.size
+    }
+
+    private fun matchAlbums(db: SQLiteDatabase, ids: List<String>, local: LocalAlbums, suffix: String, now: Long) {
+        data class Entry(val id: String, val tags: TrackTags, val oldSuffix: String, val oldPath: String?)
+        val albums = mutableMapOf<String, MutableList<Entry>>()
+        db.rawQuery("""SELECT s.albumId, s.id, s.album, s.albumArtist,
+                       s.title, s.artist, s.disc, s.track, s.duration, s.displaySuffix, s.localPath, s.suffix
+                       FROM songs s WHERE s.albumId IN (${ids.joinToString(",") { "?" }})
+                       ORDER BY s.id""", ids.toTypedArray()).use { c ->
+            while (c.moveToNext()) {
+                val tags = TrackTags(c.getString(2).orEmpty(), c.getString(3).orEmpty(), c.getString(4).orEmpty(),
+                    c.getString(5).orEmpty(), c.getInt(6), c.getInt(7), c.getLong(8),
+                    c.getString(11).orEmpty().lowercase())
+                albums.getOrPut(c.getString(0)) { mutableListOf() }
+                    .add(Entry(c.getString(1), tags, c.getString(9), c.getString(10)))
+            }
+        }
+        for ((albumId, entries) in albums) {
+            db.delete("album_match_inputs", "albumId = ?", arrayOf(albumId))
+            for (name in entries.map { it.tags.album }.distinct()) {
+                db.execSQL("INSERT INTO album_match_inputs(albumId, album, digest) VALUES(?,?,?)",
+                    arrayOf(albumId, name, local.digest(name)))
+            }
+            val display = local.display(entries.map { it.id to it.tags }, suffix)
+            var changed = false
+            for (entry in entries) {
+                val path = display.localPaths[entry.id]
+                if (entry.oldPath == path && entry.oldSuffix == display.suffix) continue
+                db.execSQL("UPDATE songs SET localPath = ?, displaySuffix = ? WHERE id = ?",
+                    arrayOf(path, display.suffix, entry.id))
+                changed = true
+            }
+            if (changed) db.execSQL("UPDATE songs SET modified = ? WHERE albumId = ?", arrayOf<Any>(now, albumId))
+        }
     }
 
     /** After the cache is cleared, songs the server no longer has have nothing left to play. */
@@ -551,11 +651,15 @@ class LibraryDb(ctx: Context) : SQLiteOpenHelper(ctx, "library.db", null, 7) {
                   (SELECT COALESCE(SUM(bytes), 0) FROM cache WHERE complete = 1),
                   (SELECT COUNT(*) FROM songs WHERE removed = 1),
                   (SELECT COUNT(*) FROM playlists),
-                  (SELECT COUNT(*) FROM radios)""",
+                  (SELECT COUNT(*) FROM radios),
+                  (SELECT COUNT(DISTINCT artistId) FROM albums WHERE id IN (SELECT albumId FROM songs WHERE localPath IS NULL)),
+                  (SELECT COUNT(DISTINCT albumId) FROM songs WHERE localPath IS NULL),
+                  (SELECT COUNT(*) FROM songs WHERE localPath IS NOT NULL)""",
         null,
     ).use { c ->
         c.moveToFirst()
-        LibraryCounts(c.getInt(0), c.getInt(1), c.getInt(2), c.getInt(3), c.getLong(4), c.getInt(5), c.getInt(6), c.getInt(7))
+        LibraryCounts(c.getInt(0), c.getInt(1), c.getInt(2), c.getInt(3), c.getLong(4), c.getInt(5), c.getInt(6), c.getInt(7),
+            hiddenArtists = c.getInt(0) - c.getInt(8), hiddenAlbums = c.getInt(1) - c.getInt(9), hiddenSongs = c.getInt(10))
     }
 
     fun albumSummaries(): List<AlbumSummary> {
@@ -584,7 +688,7 @@ class LibraryDb(ctx: Context) : SQLiteOpenHelper(ctx, "library.db", null, 7) {
         val db = writableDatabase
         db.beginTransaction()
         try {
-            for (t in listOf("songs", "albums", "artists", "cache", "pins", "lyrics", "playlists", "playlist_songs", "radios", "ratings", "scrobbles")) {
+            for (t in listOf("album_match_inputs", "songs", "albums", "artists", "cache", "pins", "lyrics", "playlists", "playlist_songs", "radios", "ratings", "scrobbles")) {
                 db.delete(t, null, null)
             }
             db.setTransactionSuccessful()

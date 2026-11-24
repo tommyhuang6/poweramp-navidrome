@@ -275,7 +275,7 @@ class CacheManager(private val s: Services) {
             enforceLimit()
             s.changed()
             // Covers too, so an offline song still shows its artwork.
-            for (id in listOfNotNull(song.coverArt, s.db.albumCoverArt(song.albumId)).distinct()) s.covers.file(id)
+            for (id in s.db.trackCoverIds(song.id)) s.covers.file(id)
         }
 
         private fun fail() {

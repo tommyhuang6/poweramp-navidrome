@@ -39,10 +39,10 @@ class Settings(ctx: Context) {
         get() = p.getLong("lastSync", 0)
         set(v) = p.edit { putLong("lastSync", v) }
 
-    /** Adds [albumSuffix] to album names so Navidrome albums never merge with local copies. */
-    var useAlbumSuffix: Boolean
-        get() = p.getBoolean("useAlbumSuffix", false)
-        set(v) = p.edit { putBoolean("useAlbumSuffix", v) }
+    /** Compare with Poweramp's local library after the user grants access. */
+    var matchLocalAlbums: Boolean
+        get() = p.getBoolean("matchLocalAlbums", false)
+        set(v) = p.edit { putBoolean("matchLocalAlbums", v) }
     var albumSuffix: String
         get() = p.getString("albumSuffix", " · ND")!!
         set(v) = p.edit { putString("albumSuffix", v) }

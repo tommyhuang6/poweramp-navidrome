@@ -60,6 +60,8 @@ kotlin {
 
 dependencies {
     implementation(project(":poweramp_api_lib"))
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.robolectric:robolectric:4.14.1")
 
     implementation("androidx.core:core-ktx:1.17.0")
     implementation("androidx.activity:activity-compose:1.10.1")
