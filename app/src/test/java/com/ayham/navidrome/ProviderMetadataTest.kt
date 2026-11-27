@@ -87,7 +87,7 @@ class ProviderMetadataTest {
 
     @Test fun extendedMetadataChangesRefreshAnOtherwiseUnchangedAlbum() {
         val app: Application = RuntimeEnvironment.getApplication()
-        LibraryDb(app).use { db ->
+        LibraryDb(app).useDatabase { db ->
             var track = song()
             fun sync() = db.applySync(emptyList(), listOf(album), listOf(track), emptySet(), null, " · ND")
             assertEquals(1, sync().added)
@@ -117,14 +117,14 @@ class ProviderMetadataTest {
     private fun checkLegacyUpgrade(version: Int) {
         val app: Application = RuntimeEnvironment.getApplication()
         val track = song()
-        LibraryDb(app).use { db ->
+        LibraryDb(app).useDatabase { db ->
             db.applySync(emptyList(), listOf(album), listOf(track), emptySet(), null, " · ND")
             db.applyPlaylists(listOf(Playlist("playlist", "Keep me", "", listOf(track.id))), emptyList())
             db.writableDatabase.execSQL("UPDATE songs SET modified = 1, displaySuffix = ' · ND'")
             removeExtendedMetadataColumns(db.writableDatabase)
             db.writableDatabase.version = version
         }
-        LibraryDb(app).use { db ->
+        LibraryDb(app).useDatabase { db ->
             val restored = db.song(track.id)!!
             assertTrue(db.resendTags)
             assertEquals(14, db.readableDatabase.version)
@@ -143,11 +143,11 @@ class ProviderMetadataTest {
     @Test fun earlierMetadataBuildKeepsAlreadyPresentColumns() {
         val app: Application = RuntimeEnvironment.getApplication()
         val track = song()
-        LibraryDb(app).use { db ->
+        LibraryDb(app).useDatabase { db ->
             db.applySync(emptyList(), listOf(album), listOf(track), emptySet(), null, " · ND")
             db.writableDatabase.version = 11
         }
-        LibraryDb(app).use { db ->
+        LibraryDb(app).useDatabase { db ->
             assertEquals(track, db.song(track.id)!!.song)
             assertEquals(14, db.readableDatabase.version)
             assertTrue(db.resendTags)

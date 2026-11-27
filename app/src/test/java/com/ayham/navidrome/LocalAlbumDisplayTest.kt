@@ -309,13 +309,13 @@ class LocalAlbumDisplayTest {
         val album = Album("record", "Record", "Singer", "artist", null, 2024)
         val track = song(album, 1)
         val file = local(track).let { it.copy(tags = it.tags.copy(durationMs = 0)) }
-        LibraryDb(app).use { db ->
+        LibraryDb(app).useDatabase { db ->
             db.applySync(emptyList(), listOf(album), listOf(track), emptySet(), LocalAlbums(listOf(file)), suffix)
             // Simulate a cached classification made by the duration-based version.
             db.writableDatabase.execSQL("UPDATE songs SET localPath = NULL, displaySuffix = ' · ND'")
             db.writableDatabase.version = 13
         }
-        LibraryDb(app).use { db ->
+        LibraryDb(app).useDatabase { db ->
             val result = db.applySync(emptyList(), listOf(album), listOf(track), emptySet(), LocalAlbums(listOf(file)), suffix)
             assertEquals(1, result.rematchedAlbums)
             assertEquals(file.path, db.song(track.id)!!.localPath)
@@ -328,7 +328,7 @@ class LocalAlbumDisplayTest {
         val partial = Album("p", "Partial", "A", "a", null, 2024)
         val songs = listOf(song(full, 1), song(partial, 1), song(partial, 2))
         val local = LocalAlbums(songs.take(2).map(::local))
-        LibraryDb(RuntimeEnvironment.getApplication()).use { db ->
+        LibraryDb(RuntimeEnvironment.getApplication()).useDatabase { db ->
             db.applySync(emptyList(), listOf(full, partial), songs, emptySet(), local, suffix)
             for (text in listOf("", suffix, "", " · Cloud")) {
                 db.updateAlbumDisplay(local, text, forceRematch = true)
