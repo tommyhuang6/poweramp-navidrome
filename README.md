@@ -38,7 +38,7 @@ Turn off battery optimisation for the app (there's a button) so downloads and sc
 
 Every release is built by [GitHub Actions](.github/workflows/build.yml) from the tagged source in this repository. Nothing is built on my machine.
 
-- **Signing key.** Releases are signed with my own release key. It is stored in this repository's GitHub Secrets (where the workflow reads it) and in a private local signing directory, never in the source. The certificate's SHA-256 fingerprint is
+- **Signing key.** Releases are signed with my own release key. It is stored in this repository's GitHub Secrets (where the workflow reads it) and in the local gitignored `keystore/` directory, never in Git. Back up the complete project directory to preserve `keystore/poweramp-navidrome.jks` and `keystore/keystore-password.txt`. The certificate's SHA-256 fingerprint is
 
   ```
   B4:3C:6F:62:3C:E0:70:42:79:A7:78:CD:14:63:18:A4:A4:96:1E:FA:00:FF:4F:0D:56:C3:6F:AA:6E:99:03:9F
