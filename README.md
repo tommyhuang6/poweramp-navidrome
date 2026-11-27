@@ -38,17 +38,19 @@ Turn off battery optimisation for the app (there's a button) so downloads and sc
 
 Every release is built by [GitHub Actions](.github/workflows/build.yml) from the tagged source in this repository. Nothing is built on my machine.
 
-- **Signing key.** Releases are signed with my own release key. It exists only in this repository's GitHub Secrets (where the workflow reads it) and in a private backup, and never in the source. The certificate's SHA-256 fingerprint is
+- **Signing key.** Releases are signed with my own release key. It is stored in this repository's GitHub Secrets (where the workflow reads it) and in a private local signing directory, never in the source. The certificate's SHA-256 fingerprint is
 
   ```
-  AB:86:FE:6A:36:1D:B6:00:45:F3:39:3D:99:36:1B:1A:13:62:AF:AE:6D:CA:B2:AA:FF:0C:F2:0D:1E:98:03:A1
+  B4:3C:6F:62:3C:E0:70:42:79:A7:78:CD:14:63:18:A4:A4:96:1E:FA:00:FF:4F:0D:56:C3:6F:AA:6E:99:03:9F
   ```
+
+  A new signing key was configured on 2026-11-27. APKs signed with this key cannot update installations signed with the previous key.
 
   The workflow refuses to publish an APK signed with anything else. Check a download yourself with `apksigner verify --print-certs navidrome-for-poweramp-<version>.apk`. Android also refuses to update the app with an APK signed by a different key.
 - **Build provenance.** Each release APK has a signed [GitHub attestation](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations) linking it to the exact commit and workflow run that built it:
 
   ```bash
-  gh attestation verify navidrome-for-poweramp-<version>.apk --repo ayhamo/poweramp-navidrome
+  gh attestation verify navidrome-for-poweramp-<version>.apk --repo tommyhuang6/poweramp-navidrome
   ```
 
 - **Checksum.** Each release also lists the APK's SHA-256 (`.sha256` file).
