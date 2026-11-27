@@ -99,15 +99,15 @@ class LocalAlbumDisplayTest {
 
         val album = Album("record", "Record", "Singer", "artist", null, 2024)
         val songs = (1..12).map { song(album, it) }
-        fun localCopy(lastTrackDifferenceMs: Long) = LocalAlbums(songs.map { song ->
+        fun localCopy(lastTrackFormat: String) = LocalAlbums(songs.map { song ->
             val file = local(song)
-            if (song.track != 12) file else file.copy(tags = file.tags.copy(durationMs = song.durationMs + lastTrackDifferenceMs))
+            if (song.track != 12) file else file.copy(tags = file.tags.copy(format = lastTrackFormat))
         })
 
-        services.db.applySync(emptyList(), listOf(album), songs, emptySet(), localCopy(2001), suffix)
+        services.db.applySync(emptyList(), listOf(album), songs, emptySet(), localCopy("mp3"), suffix)
         assertEquals(mapOf("al:record" to "Record$suffix"), children("ar:artist"))
         assertEquals(12, children("al:record").size)
-        services.db.updateAlbumDisplay(localCopy(2000), suffix)
+        services.db.updateAlbumDisplay(localCopy("flac"), suffix)
         assertEquals(emptyMap<String, String>(), children("ar:artist"))
         assertEquals(emptyMap<String, String>(), children("al:record"))
         assertThrows(FileNotFoundException::class.java) { provider.queryDocument("tr:record-12", columns).close() }
@@ -154,8 +154,8 @@ class LocalAlbumDisplayTest {
             tables.execSQL("CREATE TABLE folder_files(album_id, album_artist_id, title_tag, artist_id, disc, track_tag, " +
                 "duration, file_path, folder_id, name, url, file_type)")
             tables.execSQL("INSERT INTO albums VALUES (1, 'Record')")
-            tables.execSQL("INSERT INTO artists VALUES (2, 'Singer')")
-            tables.execSQL("INSERT INTO album_artists VALUES (3, 'Band')")
+            tables.execSQL("INSERT INTO artists VALUES (2, 'Singer • Guest')")
+            tables.execSQL("INSERT INTO album_artists VALUES (3, 'Band • Ensemble')")
             val app: Application = RuntimeEnvironment.getApplication()
             val localFile = java.io.File(app.cacheDir, "local.flac")
             tables.execSQL("INSERT INTO folders VALUES (4, ?)", arrayOf(app.cacheDir.path + "/"))
@@ -167,8 +167,13 @@ class LocalAlbumDisplayTest {
                 override fun onCreate() = true
                 override fun query(uri: Uri, projection: Array<out String>?, selection: String?,
                                    args: Array<out String>?, order: String?): Cursor {
-                    val table = if (uri.lastPathSegment == "files") "folder_files" else uri.lastPathSegment!!
-                    return tables.query(table, projection, selection, args, null, null, order)
+                    val table = if (uri.lastPathSegment == "files")
+                        "folder_files LEFT JOIN artists ON artists._id = folder_files.artist_id"
+                    else uri.lastPathSegment!!
+                    // Real Poweramp's artist category hides combined artist rows. The file join
+                    // must still expose the unmodified full tag used by the cloud library.
+                    val filter = if (uri.lastPathSegment in listOf("artists", "album_artists")) "0" else selection
+                    return tables.query(table, projection, filter, args, null, null, order)
                 }
                 override fun getType(uri: Uri): String? = null
                 override fun insert(uri: Uri, values: ContentValues?): Uri = error("Read only")
@@ -178,7 +183,7 @@ class LocalAlbumDisplayTest {
             provider.attachInfo(app, android.content.pm.ProviderInfo().apply { authority = PowerampAPI.AUTHORITY })
             ShadowContentResolver.registerProviderInternal(PowerampAPI.AUTHORITY, provider)
             val library = readLocalAlbums(app)
-            val tags = TrackTags("Record", "Band", "Local", "Singer", 1, 1, 90000, "flac")
+            val tags = TrackTags("Record", "Band • Ensemble", "Local", "Singer • Guest", 1, 1, 90000, "flac")
             assertEquals(mapOf("1" to localFile.path),
                 library.display(listOf("1" to tags), suffix).localPaths)
             assertEquals(AlbumDisplay(), library.display(listOf("2" to tags.copy(title = "Cloud", track = 2),
@@ -232,6 +237,7 @@ class LocalAlbumDisplayTest {
         try {
             db.applySync(emptyList(), listOf(album), songs, emptySet(), LocalAlbums(songs.map(::local)), suffix)
             // Reproduce the v8 schema with a previous match from before format was checked.
+            removeExtendedMetadataColumns(db.writableDatabase)
             db.writableDatabase.execSQL("DROP TRIGGER invalidate_deleted_track")
             db.writableDatabase.execSQL("DROP TABLE album_match_inputs")
             db.writableDatabase.version = 8
@@ -259,6 +265,7 @@ class LocalAlbumDisplayTest {
         try {
             db.applySync(emptyList(), listOf(album), listOf(original), emptySet(), library, suffix)
             // A cached non-match from the size-based release must be revisited after upgrading.
+            removeExtendedMetadataColumns(db.writableDatabase)
             db.writableDatabase.execSQL("UPDATE songs SET localPath = NULL")
             db.writableDatabase.version = 9
         } finally {
@@ -279,19 +286,65 @@ class LocalAlbumDisplayTest {
         }
     }
 
-    @Test fun matchUsesTagsFormatAndDurationIndependentlyOfBaseFilename() {
+    @Test fun matchUsesTagsAndExtensionRegardlessOfDurationOrBaseFilename() {
         val original = TrackTags("Album", "Artist", "Song", "Singer", 1, 1, 185000, "flac")
         val file = LocalTrack(original, "/sdcard/Music/arbitrary-name.flac")
         val index = LocalAlbums(listOf(file))
         fun hidden(tags: TrackTags) = index.display(listOf("song-id" to tags), suffix).localPaths
         assertEquals(mapOf("song-id" to file.path), hidden(original))
-        assertEquals(mapOf("song-id" to file.path), hidden(original.copy(durationMs = 183000)))
-        assertEquals(mapOf("song-id" to file.path), hidden(original.copy(durationMs = 187000)))
-        for (different in listOf(original.copy(durationMs = 182999), original.copy(format = "mp3"),
-            original.copy(durationMs = 187001), original.copy(durationMs = 0),
+        for (duration in listOf(0L, -1L, 1000L, 185000L, 999000L)) {
+            assertEquals(mapOf("song-id" to file.path), hidden(original.copy(durationMs = duration)))
+            val changedLocal = LocalAlbums(listOf(file.copy(tags = original.copy(durationMs = duration))))
+            assertEquals(mapOf("song-id" to file.path), changedLocal.display(listOf("song-id" to original), suffix).localPaths)
+            assertEquals(index.digest(original.album), changedLocal.digest(original.album))
+        }
+        for (different in listOf(original.copy(format = "mp3"), original.copy(format = ""),
             original.copy(title = "Different"), original.copy(disc = 0), original.copy(track = 0))) {
             assertEquals(emptyMap<String, String>(), hidden(different))
         }
+    }
+
+    @Test fun v13UpgradeRechecksDurationBasedNonMatches() {
+        val app: Application = RuntimeEnvironment.getApplication()
+        val album = Album("record", "Record", "Singer", "artist", null, 2024)
+        val track = song(album, 1)
+        val file = local(track).let { it.copy(tags = it.tags.copy(durationMs = 0)) }
+        LibraryDb(app).use { db ->
+            db.applySync(emptyList(), listOf(album), listOf(track), emptySet(), LocalAlbums(listOf(file)), suffix)
+            // Simulate a cached classification made by the duration-based version.
+            db.writableDatabase.execSQL("UPDATE songs SET localPath = NULL, displaySuffix = ' · ND'")
+            db.writableDatabase.version = 13
+        }
+        LibraryDb(app).use { db ->
+            val result = db.applySync(emptyList(), listOf(album), listOf(track), emptySet(), LocalAlbums(listOf(file)), suffix)
+            assertEquals(1, result.rematchedAlbums)
+            assertEquals(file.path, db.song(track.id)!!.localPath)
+            assertEquals(1, db.counts().hiddenSongs)
+        }
+    }
+
+    @Test fun suffixCanBeDisabledAndRestoredWithoutChangingHiddenTracks() {
+        val full = Album("f", "Full", "A", "a", null, 2024)
+        val partial = Album("p", "Partial", "A", "a", null, 2024)
+        val songs = listOf(song(full, 1), song(partial, 1), song(partial, 2))
+        val local = LocalAlbums(songs.take(2).map(::local))
+        LibraryDb(RuntimeEnvironment.getApplication()).use { db ->
+            db.applySync(emptyList(), listOf(full, partial), songs, emptySet(), local, suffix)
+            for (text in listOf("", suffix, "", " · Cloud")) {
+                db.updateAlbumDisplay(local, text, forceRematch = true)
+                assertEquals(1, db.counts().hiddenSongs)
+                assertEquals("Partial$text", db.albumFolder("p")!!.first.name)
+                assertEquals(null, db.albumFolder("f"))
+                assertEquals(local(songs.first()).path, db.song(songs.first().id)!!.localPath)
+            }
+        }
+        val settings = Settings(RuntimeEnvironment.getApplication())
+        settings.matchLocalAlbums = false
+        settings.albumSuffixEnabled = false
+        assertEquals("", settings.effectiveAlbumSuffix)
+        settings.albumSuffixEnabled = true
+        assertEquals(false, settings.matchLocalAlbums)
+        assertEquals(settings.albumSuffix, settings.effectiveAlbumSuffix)
     }
 
     @Test fun onePhysicalTrackCannotHideTwoIdenticalCloudTracks() {

@@ -12,10 +12,11 @@ It uses Poweramp's official [Track Provider API](https://github.com/maxmpz/power
 - **Offline albums.** Pick albums (or the whole library) to keep on the phone. Optionally only over Wi-Fi.
 - **Playlists and radio.** Your Navidrome playlists and internet radio stations appear in Poweramp's Playlists and Streams.
 - **Tags, covers, lyrics.** Metadata comes from the server, so Poweramp never has to read the files. Synced lyrics (LRC) show in Poweramp's lyrics view.
+- **Disc and audio information.** Disc/track numbers follow [Android's combined `TRACK` format](https://developer.android.com/reference/android/provider/MediaStore.Audio.AudioColumns#TRACK). Sample rate, channel count, bitrate and composer use [Poweramp's provider metadata columns](https://github.com/maxmpz/powerampapi/blob/master/poweramp_provider_example/src/main/java/com/maxmpz/powerampproviderexample/ExampleProvider.java) when supplied by the server. Sync reads the server's indexed tags; it does not trigger a server file scan.
 - **Scrobbling.** Plays are sent to Navidrome, which shows "now playing" and forwards to Last.fm or ListenBrainz if you linked them. Offline plays are sent later.
 - **Likes and ratings.** Like in Poweramp = ❤ and 5 stars in Navidrome; 2–4 stars = that many stars; unlike = 1 star; no rating clears both.
 - **Lower quality on mobile data (optional).** Opus at 96, 128 or 192 kbps, on mobile data only or always. These copies are temporary and never replace the originals in the cache.
-- **Local album matching.** After Poweramp scans your phone, turn on **Match local albums** and grant access to Poweramp's library. Albums with every track available locally are hidden. A partial match keeps the complete cloud album with a suffix (default ` · ND`). Albums with no matching tracks keep their names. The library summary shows visible and hidden counts. After changing your local files, scan them in Poweramp and tap **Refresh local matches** in the plugin. **Sync library** also refreshes matches.
+- **Local album matching.** **Match local albums** is enabled by default; grant access to Poweramp's library after Poweramp scans your phone. Albums with every track available locally are hidden. A partial match keeps the complete cloud album with an optional suffix (default ` · ND`). The separate **Album suffix** switch controls only that suffix and never changes local matching. Albums with no matching tracks keep their names. The library summary shows visible and hidden counts. After changing your local files, scan them in Poweramp and tap **Refresh local matches** in the plugin. **Sync library** also refreshes matches.
 
 ## What it does to your server
 
@@ -76,7 +77,7 @@ Or with JDK 17, the Android SDK (platform 36) and Gradle 8.14: `gradle assembleD
 
 ## Known limits
 
-- Local matching compares album, album artist, title, artist, disc and track number, format and track duration (up to two seconds of difference). Copies with different filenames or file sizes can match. Tracks with unknown duration stay visible. Repeat syncs read the current metadata and reuse saved matches for unchanged albums.
+- Local matching compares album, album artist, title, artist, disc and track number, and file extension (for example, MP3 does not match FLAC). Duration, filename, file size, bitrate, bit depth and sample rate do not affect matching. Artist and album artist are read directly from Poweramp's original song metadata without splitting or rewriting separators. Repeat syncs read the current metadata and reuse saved matches for unchanged albums.
 - Poweramp doesn't crossfade between songs with different sample rates (e.g. a 96 kHz FLAC into a 48 kHz Opus).
 - After a song is retagged on the server, Poweramp shows the new tags but keeps the old file name in its "show file names" mode.
 

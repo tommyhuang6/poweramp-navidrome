@@ -112,7 +112,7 @@ class SyncManager(private val s: Services) {
             localAlbums()
         } else null
         progress("Saving…")
-        val result = s.db.applySync(artists, albums, songs, s.db.completeCacheIds(), local, s.settings.albumSuffix)
+        val result = s.db.applySync(artists, albums, songs, s.db.completeCacheIds(), local, s.settings.effectiveAlbumSuffix)
         coverRevision++
         s.db.applyPlaylists(playlists, radios)
         s.settings.lastSync = System.currentTimeMillis()
@@ -127,12 +127,21 @@ class SyncManager(private val s: Services) {
     }
 
     @Synchronized
-    fun configureAlbumMatching(enabled: Boolean, suffix: String) {
-        val effectiveSuffix = suffix.ifBlank { " · ND" }
-        s.db.updateAlbumDisplay(if (enabled) localAlbums() else null, effectiveSuffix)
+    fun configureAlbumMatching(enabled: Boolean) {
+        s.db.updateAlbumDisplay(if (enabled) localAlbums() else null, s.settings.effectiveAlbumSuffix)
         coverRevision++
         s.settings.matchLocalAlbums = enabled
-        s.settings.albumSuffix = effectiveSuffix
+        notifyChanged()
+    }
+
+    @Synchronized
+    fun configureAlbumSuffix(enabled: Boolean, suffix: String) {
+        val text = suffix.ifBlank { " · ND" }
+        s.db.updateAlbumDisplay(if (s.settings.matchLocalAlbums) localAlbums() else null,
+            if (enabled) text else "", forceRematch = true)
+        coverRevision++
+        s.settings.albumSuffix = text
+        s.settings.albumSuffixEnabled = enabled
         notifyChanged()
     }
 

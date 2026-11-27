@@ -4,6 +4,7 @@ import android.content.res.AssetFileDescriptor
 import android.database.Cursor
 import android.database.MatrixCursor
 import android.graphics.Point
+import android.media.MediaFormat
 import android.net.Uri
 import android.os.Bundle
 import android.os.CancellationSignal
@@ -236,8 +237,14 @@ class NavidromeProvider : DocumentsProvider() {
         r.add(MediaStore.Audio.AudioColumns.ALBUM, song.album + row.displaySuffix)
         if (song.year > 0) r.add(MediaStore.Audio.AudioColumns.YEAR, song.year)
         r.add(TrackProviderConsts.COLUMN_ALBUM_ARTIST, song.albumArtist.ifBlank { song.artist })
+        if (song.composer.isNotBlank()) r.add(MediaStore.Audio.AudioColumns.COMPOSER, song.composer)
         if (song.genre.isNotBlank()) r.add(TrackProviderConsts.COLUMN_GENRE, song.genre)
-        if (song.track > 0) r.add(MediaStore.Audio.AudioColumns.TRACK, song.track)
+        // MediaStore.TRACK encodes disc * 1000 + track; track_alt only controls folder order.
+        if (song.track > 0) r.add(MediaStore.Audio.AudioColumns.TRACK, song.disc.coerceAtLeast(0) * 1000 + song.track)
+        if (song.sampleRate > 0) r.add(MediaFormat.KEY_SAMPLE_RATE, song.sampleRate)
+        if (song.channelCount > 0) r.add(MediaFormat.KEY_CHANNEL_COUNT, song.channelCount)
+        // Subsonic uses kbit/s; the provider's MediaFormat column uses bit/s.
+        if (song.bitRate > 0) r.add(MediaFormat.KEY_BIT_RATE, song.bitRate.toLong() * 1000)
         if (song.bitDepth > 0) r.add(TrackProviderConsts.COLUMN_BITS_PER_SAMPLE, song.bitDepth)
         // Empty wave: otherwise Poweramp reads every file during the scan to draw one.
         if (TrackProviderConsts.COLUMN_TRACK_WAVE in projection) r.add(TrackProviderConsts.COLUMN_TRACK_WAVE, ByteArray(0))
@@ -349,7 +356,8 @@ class NavidromeProvider : DocumentsProvider() {
             MediaStore.MediaColumns.TITLE, MediaStore.Audio.AudioColumns.DURATION, MediaStore.Audio.AudioColumns.ARTIST,
             MediaStore.Audio.AudioColumns.ALBUM, MediaStore.Audio.AudioColumns.YEAR, TrackProviderConsts.COLUMN_ALBUM_ARTIST,
             TrackProviderConsts.COLUMN_GENRE, MediaStore.Audio.AudioColumns.TRACK, TrackProviderConsts.COLUMN_TRACK_ALT,
-            TrackProviderConsts.COLUMN_BITS_PER_SAMPLE,
+            TrackProviderConsts.COLUMN_BITS_PER_SAMPLE, MediaStore.Audio.AudioColumns.COMPOSER,
+            MediaFormat.KEY_SAMPLE_RATE, MediaFormat.KEY_CHANNEL_COUNT, MediaFormat.KEY_BIT_RATE,
         )
     }
 }

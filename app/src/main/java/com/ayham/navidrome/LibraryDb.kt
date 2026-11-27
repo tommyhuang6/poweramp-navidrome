@@ -56,7 +56,7 @@ data class LibraryCounts(
  * Local copy of the library. The provider answers Poweramp only from here, so scans never wait on
  * the network.
  */
-class LibraryDb(ctx: Context) : SQLiteOpenHelper(ctx, "library.db", null, 10) {
+class LibraryDb(ctx: Context) : SQLiteOpenHelper(ctx, "library.db", null, 14) {
     private val meta = ctx.getSharedPreferences("library_meta", Context.MODE_PRIVATE)
 
     /** Set by an upgrade that needs Poweramp to rescan (see onUpgrade). */
@@ -75,7 +75,9 @@ class LibraryDb(ctx: Context) : SQLiteOpenHelper(ctx, "library.db", null, 10) {
                 albumArtist TEXT, track INTEGER, disc INTEGER, year INTEGER, genre TEXT, duration INTEGER,
                 size INTEGER, suffix TEXT, contentType TEXT, bitRate INTEGER, bitDepth INTEGER, coverArt TEXT,
                 metaHash TEXT, modified INTEGER, removed INTEGER DEFAULT 0, hasLyrics INTEGER DEFAULT -1,
-                seen INTEGER DEFAULT 1, displaySuffix TEXT NOT NULL DEFAULT '', localPath TEXT)"""
+                seen INTEGER DEFAULT 1, displaySuffix TEXT NOT NULL DEFAULT '', localPath TEXT,
+                sampleRate INTEGER NOT NULL DEFAULT 0, channelCount INTEGER NOT NULL DEFAULT 0,
+                composer TEXT NOT NULL DEFAULT '')"""
         )
         db.execSQL("CREATE INDEX songs_album ON songs(albumId)")
         db.execSQL(
@@ -116,6 +118,24 @@ class LibraryDb(ctx: Context) : SQLiteOpenHelper(ctx, "library.db", null, 10) {
             resendTags = true
         }
         if (oldVersion == 9) db.delete("album_match_inputs", null, null) // Recheck size-based results on the next match.
+        if (oldVersion < 13) {
+            // Local releases used schema 12 with the v10 columns; an earlier metadata build
+            // used schema 11 with these columns already present. Accept both upgrade paths.
+            val columns = db.rawQuery("PRAGMA table_info(songs)", null).use { c ->
+                buildSet { while (c.moveToNext()) add(c.getString(1)) }
+            }
+            for ((name, definition) in listOf("sampleRate" to "INTEGER NOT NULL DEFAULT 0",
+                "channelCount" to "INTEGER NOT NULL DEFAULT 0", "composer" to "TEXT NOT NULL DEFAULT ''")) {
+                if (name !in columns) db.execSQL("ALTER TABLE songs ADD COLUMN $name $definition")
+            }
+            // TRACK now includes the disc number. Re-send even unchanged, already synced tracks.
+            db.execSQL("UPDATE songs SET modified = ?", arrayOf(System.currentTimeMillis()))
+            resendTags = true
+        }
+        if (oldVersion < 14) {
+            // Recheck classifications saved by releases that required matching durations.
+            db.delete("album_match_inputs", null, null)
+        }
     }
 
     private fun createMatchCache(db: SQLiteDatabase) {
@@ -143,7 +163,8 @@ class LibraryDb(ctx: Context) : SQLiteOpenHelper(ctx, "library.db", null, 10) {
 
     private val songCols = "s.id, s.title, s.artist, s.album, s.albumId, s.artistId, s.albumArtist, s.track, " +
         "s.disc, s.year, s.genre, s.duration, s.size, s.suffix, s.contentType, s.bitRate, s.bitDepth, " +
-        "s.coverArt, s.modified, s.removed, s.hasLyrics, s.displaySuffix, s.localPath"
+        "s.coverArt, s.modified, s.removed, s.hasLyrics, s.displaySuffix, s.localPath, " +
+        "s.sampleRate, s.channelCount, s.composer"
 
     private fun Cursor.toSongRow() = SongRow(
         Song(
@@ -152,6 +173,7 @@ class LibraryDb(ctx: Context) : SQLiteOpenHelper(ctx, "library.db", null, 10) {
             track = getInt(7), disc = getInt(8), year = getInt(9), genre = getString(10) ?: "",
             durationMs = getLong(11), size = getLong(12), suffix = getString(13) ?: "",
             contentType = getString(14) ?: "", bitRate = getInt(15), bitDepth = getInt(16), coverArt = getString(17),
+            sampleRate = getInt(23), channelCount = getInt(24), composer = getString(25).orEmpty(),
         ),
         modified = getLong(18), removed = getInt(19) != 0, hasLyrics = getInt(20),
         displaySuffix = getString(21), localPath = getString(22),
@@ -309,6 +331,7 @@ class LibraryDb(ctx: Context) : SQLiteOpenHelper(ctx, "library.db", null, 10) {
                     put("disc", s.disc); put("year", s.year); put("genre", s.genre); put("duration", s.durationMs)
                     put("size", s.size); put("suffix", s.suffix); put("contentType", s.contentType)
                     put("bitRate", s.bitRate); put("bitDepth", s.bitDepth); put("coverArt", s.coverArt)
+                    put("sampleRate", s.sampleRate); put("channelCount", s.channelCount); put("composer", s.composer)
                     put("metaHash", s.metaHash); put("removed", 0); put("seen", 1)
                 }
                 if (prev == null) {
@@ -359,10 +382,11 @@ class LibraryDb(ctx: Context) : SQLiteOpenHelper(ctx, "library.db", null, 10) {
         return SyncResult(added, changed, kept, dropped, stale, rematched)
     }
 
-    internal fun updateAlbumDisplay(local: LocalAlbums?, suffix: String) {
+    internal fun updateAlbumDisplay(local: LocalAlbums?, suffix: String, forceRematch: Boolean = false) {
         val db = writableDatabase
         db.beginTransaction()
         try {
+            if (forceRematch) db.delete("album_match_inputs", null, null)
             updateAlbumDisplay(db, local, suffix, System.currentTimeMillis())
             db.setTransactionSuccessful()
         } finally {

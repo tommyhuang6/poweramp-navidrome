@@ -48,6 +48,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -145,16 +147,15 @@ private fun MainScreen(vm: MainViewModel, act: MainActivity.Actions) {
     }
 
     LazyColumn(
-        Modifier.fillMaxSize().safeDrawingPadding().padding(horizontal = 22.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
+        Modifier.fillMaxSize().safeDrawingPadding().padding(horizontal = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         item {
-            Spacer(Modifier.height(24.dp))
-            Text("Navidrome in Poweramp", fontSize = 34.sp, color = MaterialTheme.colorScheme.onBackground)
+            Spacer(Modifier.height(12.dp))
+            Text("Navidrome in Poweramp", fontSize = 25.sp, color = MaterialTheme.colorScheme.onBackground)
             Spacer(Modifier.height(10.dp))
             Text(
-                "This app publishes your Subsonic library as a music folder. Poweramp plays each song " +
-                    "straight from your NAS and keeps what you play on the phone.",
+                "Your Navidrome library, ready to play in Poweramp.",
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -168,10 +169,21 @@ private fun MainScreen(vm: MainViewModel, act: MainActivity.Actions) {
                 SwitchRow("Accept untrusted HTTPS certificates", st.trustAllCerts) { vm.setTrustAll(it) }
                 SwitchRow("Send plays to Navidrome (scrobble)", st.scrobble) { vm.setScrobble(it) }
                 SwitchRow("Send likes and ratings to Navidrome", st.ratings) { vm.setRatings(it) }
+                SwitchRow("Match local albums", st.matchLocalAlbums) { on ->
+                    if (on) act.grantLibraryAccess() else vm.setAlbumMatching(false) { act.rescan() }
+                }
             }
             item {
                 PillButton("Sync library", filled = true, enabled = !work.running) { act.askNotifications(); act.sync() }
-                Spacer(Modifier.height(10.dp))
+                if (st.matchLocalAlbums) {
+                    Spacer(Modifier.height(10.dp))
+                    PillButton("Refresh local matches", enabled = !work.running) {
+                        vm.setAlbumMatching(true) { act.rescan() }
+                    }
+                }
+            }
+            item { SeparateCard(st, vm, act) }
+            item { ExpandableCard("Poweramp & account") {
                 PillButton("Ask Poweramp to rescan") { act.rescan() }
                 Spacer(Modifier.height(10.dp))
                 if (act.powerampInstalled) {
@@ -182,18 +194,18 @@ private fun MainScreen(vm: MainViewModel, act: MainActivity.Actions) {
                     PillButton("Disable battery optimisation") { act.battery() }
                     Spacer(Modifier.height(10.dp))
                 }
+                PillButton("Grant library access") { act.grantLibraryAccess() }
                 PillButton("Log out") { vm.logout() }
-            }
+            } }
             item { QualityCard(st, vm) }
             item { OfflineCard(st, vm, act, showAlbums) { showAlbums = !showAlbums } }
             if (showAlbums) {
                 items(st.albums, key = { it.id }) { album -> AlbumRow(album) { pinned -> vm.setAlbumPinned(album.id, pinned) { act.downloadOffline() } } }
             }
-            item { SeparateCard(st, vm, act) }
             if (st.removed.isNotEmpty()) item { RemovedCard(st.removed) }
         }
         item { HowToCard() }
-        item { Spacer(Modifier.height(24.dp)) }
+        item { Spacer(Modifier.height(12.dp)) }
     }
 }
 
@@ -234,8 +246,8 @@ private fun LoginCard(st: UiState, vm: MainViewModel, act: MainActivity.Actions)
 @Composable
 private fun ConnectedCard(st: UiState, work: WorkStatus) {
     InfoCard {
-        Text("Connected", fontSize = 30.sp, color = MaterialTheme.colorScheme.primary)
-        if (st.serverVersion.isNotBlank()) Text(st.serverVersion, style = MaterialTheme.typography.titleLarge)
+        Text("Connected", fontSize = 20.sp, color = MaterialTheme.colorScheme.primary)
+        if (st.serverVersion.isNotBlank()) Text(st.serverVersion, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
         Text(st.serverUrl, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         if (SubsonicClient.isInsecureRemote(st.serverUrl)) {
             Text(
@@ -243,11 +255,11 @@ private fun ConnectedCard(st: UiState, work: WorkStatus) {
                 style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error,
             )
         }
-        Text("User: ${st.username}", style = MaterialTheme.typography.titleLarge)
+        Text("User: ${st.username}", style = MaterialTheme.typography.bodySmall)
         val c = st.counts
         val visibleLabel = if (st.matchLocalAlbums) "Visible: " else ""
         Text("${visibleLabel}${c.artists - c.hiddenArtists} artists · ${c.albums - c.hiddenAlbums} albums · ${c.songs - c.hiddenSongs} songs",
-            style = MaterialTheme.typography.titleLarge)
+            style = MaterialTheme.typography.bodyMedium)
         if (st.matchLocalAlbums) {
             Text("Hidden: ${c.hiddenArtists} artists · ${c.hiddenAlbums} albums · ${c.hiddenSongs} songs",
                 style = MaterialTheme.typography.bodyMedium)
@@ -275,8 +287,7 @@ private fun ConnectedCard(st: UiState, work: WorkStatus) {
 
 @Composable
 private fun QualityCard(st: UiState, vm: MainViewModel) {
-    InfoCard {
-        Text("Streaming quality", style = MaterialTheme.typography.headlineSmall)
+    ExpandableCard("Streaming quality", st.streamQuality.label) {
         Text(
             "For songs not on the phone yet. Lower quality is a temporary Opus copy and is never kept: " +
                 "the cache always holds the original files.",
@@ -304,8 +315,7 @@ private fun QualityCard(st: UiState, vm: MainViewModel) {
 @Composable
 private fun OfflineCard(st: UiState, vm: MainViewModel, act: MainActivity.Actions, albumsShown: Boolean, toggleAlbums: () -> Unit) {
     var limit by remember(st.cacheLimitMb) { mutableStateOf(if (st.cacheLimitMb > 0) st.cacheLimitMb.toString() else "") }
-    InfoCard {
-        Text("Offline and cache", style = MaterialTheme.typography.headlineSmall)
+    ExpandableCard("Offline & cache", "${st.counts.cachedSongs} songs") {
         Text("${st.counts.cachedSongs} songs on the phone · ${formatBytes(st.counts.cachedBytes)}", style = MaterialTheme.typography.bodyLarge)
         Text("Download ahead while playing (keeps crossfade smooth)", style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -347,21 +357,16 @@ private fun AlbumRow(a: AlbumSummary, onPin: (Boolean) -> Unit) {
 private fun SeparateCard(st: UiState, vm: MainViewModel, act: MainActivity.Actions) {
     var suffix by remember(st.albumSuffix) { mutableStateOf(st.albumSuffix) }
     InfoCard {
-        Text("Local albums", style = MaterialTheme.typography.headlineSmall)
-        Text(
-            "Fully matched albums are hidden. Partially matched albums keep every song and get a suffix. " +
-                "Cloud-only albums keep their original names.",
-            style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        SwitchRow("Match local albums", st.matchLocalAlbums) { on ->
-            if (on) act.grantLibraryAccess() else vm.setAlbumMatching(false) { act.rescan() }
+        SwitchRow("Album suffix · " + if (st.albumSuffixEnabled) "On" else "Off", st.albumSuffixEnabled) { on ->
+            vm.setAlbumSuffix(on, suffix) { act.rescan() }
         }
-        if (st.matchLocalAlbums) {
-            OutlinedTextField(suffix, { suffix = it }, Modifier.fillMaxWidth(), label = { Text("Partial album suffix") }, singleLine = true)
-            PillButton("Refresh local matches") {
-                vm.setAlbumMatching(true, suffix) { act.rescan() }
+        Text("Add a suffix to partially matched albums.", style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (st.albumSuffixEnabled) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(suffix, { suffix = it }, Modifier.weight(1f), label = { Text("Suffix") }, singleLine = true)
+                OutlinedButton(onClick = { vm.setAlbumSuffix(true, suffix) { act.rescan() } }) { Text("Apply") }
             }
-            PillButton("Grant library access") { act.grantLibraryAccess() }
         }
     }
 }
@@ -379,8 +384,7 @@ private fun RemovedCard(removed: List<SongRow>) {
 
 @Composable
 private fun HowToCard() {
-    InfoCard {
-        Text("How to use it in Poweramp", style = MaterialTheme.typography.headlineSmall)
+    ExpandableCard("How to use Poweramp") {
         val steps = listOf(
             "Connect and sync here, and wait until it finishes.",
             "Tap \"Add to Poweramp Music Folders\" and tick \"Navidrome\".",
@@ -403,22 +407,22 @@ private fun InfoCard(content: @Composable () -> Unit) {
         shape = MaterialTheme.shapes.extraLarge,
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
     ) {
-        Column(Modifier.padding(22.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) { content() }
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) { content() }
     }
 }
 
 @Composable
 private fun SwitchRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
-    Row(Modifier.fillMaxWidth().clickable { onChange(!checked) }.padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(Modifier.fillMaxWidth().clickable { onChange(!checked) }.padding(vertical = 0.dp), verticalAlignment = Alignment.CenterVertically) {
         Switch(checked, onChange)
-        Spacer(Modifier.width(16.dp))
+        Spacer(Modifier.width(10.dp))
         Text(label, style = MaterialTheme.typography.titleMedium)
     }
 }
 
 @Composable
 private fun PillButton(text: String, filled: Boolean = false, enabled: Boolean = true, onClick: () -> Unit) {
-    val mod = Modifier.fillMaxWidth().height(52.dp)
+    val mod = Modifier.fillMaxWidth().height(48.dp)
     if (filled) {
         Button(onClick, mod, enabled = enabled, colors = ButtonDefaults.buttonColors()) {
             Text(text, fontWeight = FontWeight.Medium, fontSize = 16.sp)
@@ -427,5 +431,19 @@ private fun PillButton(text: String, filled: Boolean = false, enabled: Boolean =
         OutlinedButton(onClick, mod, enabled = enabled) {
             Text(text, fontSize = 16.sp, color = MaterialTheme.colorScheme.onSurface)
         }
+    }
+}
+
+@Composable
+private fun ExpandableCard(title: String, summary: String = "", content: @Composable () -> Unit) {
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    InfoCard {
+        Row(Modifier.fillMaxWidth().height(48.dp).clickable { expanded = !expanded },
+            verticalAlignment = Alignment.CenterVertically) {
+            Text(title, Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+            if (summary.isNotBlank() && !expanded) Text(summary, style = MaterialTheme.typography.bodySmall)
+            Text(if (expanded) "  −" else "  +", style = MaterialTheme.typography.titleLarge)
+        }
+        if (expanded) content()
     }
 }

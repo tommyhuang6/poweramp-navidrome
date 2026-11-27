@@ -68,10 +68,14 @@ data class Song(
     val bitRate: Int,
     val bitDepth: Int,
     val coverArt: String?,
+    val sampleRate: Int = 0,
+    val channelCount: Int = 0,
+    val composer: String = "",
 ) {
     /** Changes when anything Poweramp shows changes; used to bump LAST_MODIFIED. */
     val metaHash: String
-        get() = listOf(title, artist, album, albumArtist, track, disc, year, genre, durationMs, size, suffix, coverArt)
+        get() = listOf(title, artist, album, albumArtist, track, disc, year, genre, durationMs, size, suffix,
+            coverArt, bitRate, bitDepth, sampleRate, channelCount, composer)
             .joinToString("\u0001").hashCode().toString(16)
 }
 
@@ -219,7 +223,7 @@ class SubsonicClient(
         return (0 until list.length()).map { parseSong(list.getJSONObject(it)) }
     }
 
-    private fun parseSong(s: JSONObject) = Song(
+    internal fun parseSong(s: JSONObject) = Song(
         id = s.getString("id"),
         title = s.optString("title"),
         artist = s.optString("artist"),
@@ -238,6 +242,9 @@ class SubsonicClient(
         bitRate = s.optInt("bitRate"),
         bitDepth = s.optInt("bitDepth"),
         coverArt = s.coverArtId(),
+        sampleRate = s.optInt("samplingRate"),
+        channelCount = s.optInt("channelCount"),
+        composer = s.optString("displayComposer"),
     )
 
     /** Every playlist with its song ids in order (one extra request per playlist). */

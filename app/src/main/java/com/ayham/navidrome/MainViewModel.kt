@@ -23,8 +23,9 @@ data class UiState(
     val allOffline: Boolean = false,
     val prefetch: Prefetch = Prefetch.NEXT,
     val cacheLimitMb: Long = 0,
-    val matchLocalAlbums: Boolean = false,
+    val matchLocalAlbums: Boolean = true,
     val albumSuffix: String = "",
+    val albumSuffixEnabled: Boolean = true,
     val scrobble: Boolean = true,
     val pendingScrobbles: Int = 0,
     val ratings: Boolean = true,
@@ -67,6 +68,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     cacheLimitMb = st.cacheLimitMb,
                     matchLocalAlbums = st.matchLocalAlbums,
                     albumSuffix = st.albumSuffix,
+                    albumSuffixEnabled = st.albumSuffixEnabled,
                     scrobble = s.scrobbler.enabled,
                     pendingScrobbles = s.db.pendingScrobbles().size,
                     ratings = s.scrobbler.ratingsEnabled,
@@ -202,11 +204,21 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         s.cache.enforceLimit()
     }
 
-    fun setAlbumMatching(on: Boolean, suffix: String = s.settings.albumSuffix, onChanged: () -> Unit) {
+    fun setAlbumMatching(on: Boolean, onChanged: () -> Unit) {
         viewModelScope.launch {
-            val result = withContext(Dispatchers.IO) { runCatching { s.sync.configureAlbumMatching(on, suffix) } }
+            val result = withContext(Dispatchers.IO) { runCatching { s.sync.configureAlbumMatching(on) } }
             result.onSuccess { onChanged() }.onFailure { e ->
                 _state.update { it.copy(toast = e.message ?: "Could not read the Poweramp library") }
+            }
+            refresh()
+        }
+    }
+
+    fun setAlbumSuffix(on: Boolean, suffix: String, onChanged: () -> Unit) {
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) { runCatching { s.sync.configureAlbumSuffix(on, suffix) } }
+            result.onSuccess { onChanged() }.onFailure { e ->
+                _state.update { it.copy(toast = e.message ?: "Could not update album suffix") }
             }
             refresh()
         }

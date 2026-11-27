@@ -41,8 +41,12 @@ class Settings(ctx: Context) {
 
     /** Compare with Poweramp's local library after the user grants access. */
     var matchLocalAlbums: Boolean
-        get() = p.getBoolean("matchLocalAlbums", false)
+        get() = p.getBoolean("matchLocalAlbums", true)
         set(v) = p.edit { putBoolean("matchLocalAlbums", v) }
+    var albumSuffixEnabled: Boolean
+        get() = p.getBoolean("albumSuffixEnabled", true)
+        set(v) = p.edit { putBoolean("albumSuffixEnabled", v) }
+    val effectiveAlbumSuffix: String get() = if (albumSuffixEnabled) albumSuffix else ""
     var albumSuffix: String
         get() = p.getString("albumSuffix", " · ND")!!
         set(v) = p.edit { putString("albumSuffix", v) }

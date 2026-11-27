@@ -24,7 +24,7 @@ internal class LocalAlbums(tracks: List<LocalTrack>) {
     private val albums = tracks.filter {
         val t = it.tags
         t.album.isNotBlank() && t.artist.isNotBlank() && t.title.isNotBlank() &&
-            t.format.isNotBlank() && t.durationMs > 0
+            t.format.isNotBlank()
     }.groupBy { it.tags.album }
     private val indexes = mutableMapOf<String, Map<TrackTags, List<LocalTrack>>>()
     private val digests = mutableMapOf<String, String>()
@@ -48,7 +48,6 @@ internal class LocalAlbums(tracks: List<LocalTrack>) {
                     text(t.format)
                     out.writeInt(t.disc)
                     out.writeInt(t.track)
-                    out.writeLong(t.durationMs)
                 }
             }
             Base64.getEncoder().encodeToString(MessageDigest.getInstance("SHA-256").digest(buffer.toByteArray()))
@@ -58,17 +57,16 @@ internal class LocalAlbums(tracks: List<LocalTrack>) {
     fun display(songs: List<Pair<String, TrackTags>>, suffix: String): AlbumDisplay {
         val matches = mutableMapOf<String, String>()
         val used = mutableSetOf<String>()
-        // Shortest first on both sides permits one-to-one matches even when two candidates
-        // fall within the same duration window.
-        for ((id, tags) in songs.sortedBy { it.second.durationMs }) {
-            if (tags.durationMs <= 0) continue
+        // Duration estimates can differ between Poweramp and the server for the same audio.
+        // Compare descriptive tags and file extension, consuming each local path only once.
+        for ((id, tags) in songs) {
             val album = albums[tags.album] ?: continue
             val index = indexes.getOrPut(tags.album) {
-                album.sortedWith(compareBy<LocalTrack> { it.tags.durationMs }.thenBy { it.path })
+                album.sortedBy { it.path }
                     .groupBy { it.tags.copy(durationMs = 0) }
             }
             val match = index[tags.copy(durationMs = 0)]?.firstOrNull {
-                kotlin.math.abs(it.tags.durationMs - tags.durationMs) <= 2000 && it.path !in used
+                it.path !in used
             } ?: continue
             used += match.path
             matches[id] = match.path
@@ -92,11 +90,12 @@ internal fun readLocalAlbums(ctx: Context): LocalAlbums {
     }
 
     val albumNames = names("albums", TableDefs.Albums._ID, TableDefs.Albums.ALBUM)
-    val artistNames = names("artists", TableDefs.Artists._ID, TableDefs.Artists.ARTIST)
-    val albumArtists = names("album_artists", TableDefs.AlbumArtists._ID, TableDefs.AlbumArtists.ALBUM_ARTIST)
     val folders = names("folders", TableDefs.Folders._ID, TableDefs.Folders.PATH)
     val f = TableDefs.Files
-    val tracks = query("files", f.ALBUM_ID, f.ALBUM_ARTIST_ID, f.TITLE_TAG, f.ARTIST_ID, f.DISC, f.TRACK_TAG,
+    // The artist category omits combined multi-artist rows when Poweramp splits artists.
+    // The files endpoint joins the original artist row, preserving the full tag for exact matching.
+    val rawAlbumArtist = "(SELECT album_artist FROM album_artists WHERE album_artists._id = folder_files.album_artist_id) AS raw_album_artist"
+    val tracks = query("files", f.ALBUM_ID, rawAlbumArtist, f.TITLE_TAG, "artists.artist", f.DISC, f.TRACK_TAG,
         f.DURATION, f.FILE_PATH, f.FOLDER_ID, f.NAME, f.URL, f.FILE_TYPE).use { c ->
         buildList {
             while (c.moveToNext()) {
@@ -109,8 +108,8 @@ internal fun readLocalAlbums(ctx: Context): LocalAlbums {
                     else -> continue // @authority/... provider, stream, or unknown storage
                 }
                 if ('\n' in file || '\r' in file) continue // cannot be represented in M3U
-                val tags = TrackTags(albumNames[c.getLong(0)].orEmpty(), albumArtists[c.getLong(1)].orEmpty(),
-                    c.getString(2).orEmpty(), artistNames[c.getLong(3)].orEmpty(), c.getInt(4), c.getInt(5),
+                val tags = TrackTags(albumNames[c.getLong(0)].orEmpty(), c.getString(1).orEmpty(),
+                    c.getString(2).orEmpty(), c.getString(3).orEmpty(), c.getInt(4), c.getInt(5),
                     c.getLong(6), file.substringAfterLast('/').substringAfterLast('.', "").lowercase())
                 add(LocalTrack(tags, file))
             }
