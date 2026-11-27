@@ -76,7 +76,9 @@ dependencies {
 }
 
 // Robolectric fetches its Android runtime separately from Gradle dependencies.
+// The Google-hosted Maven Central mirror avoids shared CI runner rate limits.
+// https://docs.cloud.google.com/docs/buildpacks/java#mirror_repositories_in_gradle
 tasks.withType<org.gradle.api.tasks.testing.Test>().configureEach {
-    systemProperty("robolectric.dependency.repo.url", "https://repo.maven.apache.org/maven2")
+    systemProperty("robolectric.dependency.repo.url", "https://maven-central.storage-download.googleapis.com/maven2")
     testLogging.exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
 }
